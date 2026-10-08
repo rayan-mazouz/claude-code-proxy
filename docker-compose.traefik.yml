@@ -46,6 +46,7 @@ services:
     labels:
       # Proxy + admin API. The app mounts its routes under /api, so the prefix is NOT stripped.
       - traefik.enable=true
+      - traefik.docker.network=claude-code-proxy-traefik
       - traefik.http.routers.claude-code-proxy-api-${BG_SLOT:-stable}.rule=Host(`${DOMAIN}`) && PathPrefix(`/api`)
       - traefik.http.routers.claude-code-proxy-api-${BG_SLOT:-stable}.entrypoints=${TRAEFIK_ENTRYPOINT:-web}
       - traefik.http.routers.claude-code-proxy-api-${BG_SLOT:-stable}.priority=${BG_API_PRIORITY:-101}
@@ -59,6 +60,7 @@ services:
     labels:
       # Dashboard. It calls the backend at the relative /api path (same origin), routed above by PathPrefix.
       - traefik.enable=true
+      - traefik.docker.network=claude-code-proxy-traefik
       - traefik.http.routers.claude-code-proxy-${BG_SLOT:-stable}.rule=Host(`${DOMAIN}`)
       - traefik.http.routers.claude-code-proxy-${BG_SLOT:-stable}.entrypoints=${TRAEFIK_ENTRYPOINT:-web}
       - traefik.http.routers.claude-code-proxy-${BG_SLOT:-stable}.priority=${BG_PRIORITY:-100}
