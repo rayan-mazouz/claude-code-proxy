@@ -359,62 +359,63 @@ _OUTPUT_DELTA_MARKERS = (
 _SUCCESS_MARKERS = ("message_stop",)
 
 
-def _is_pre_output_failure(lowered: str) -> bool:
-    """Return True if the lowered SSE text shows a failure with no output."""
+_SSE_FRAME_SEPARATOR = re.compile(rb"\r?\n\r?\n")
+
+
+def _is_error_text(lowered: str) -> bool:
+    """Return True if lowered response text is a provider failure.
+
+    Model output can contain any phrase, so failure markers only count in text that carries no output event.
+    """
     has_failed = any(m in lowered for m in _FAIL_MARKERS)
     has_output = any(m in lowered for m in _OUTPUT_DELTA_MARKERS)
     return has_failed and not has_output
 
 
-def _is_provider_error_frame(frame: bytes) -> bool:
-    """Suppress Anthropic error/capacity frames, including midstream failures."""
-    lowered = frame.decode(errors="replace").lower()
-    has_error = any(marker in lowered for marker in _FAIL_MARKERS)
-    has_output = any(marker in lowered for marker in _OUTPUT_DELTA_MARKERS)
-    return (has_error and not has_output) or any(phrase in lowered for phrase in _CAPACITY_PHRASES)
+def _is_capacity_text(lowered: str) -> bool:
+    return _is_error_text(lowered) and any(p in lowered for p in _CAPACITY_PHRASES)
 
 
-_SYNTHETIC_MESSAGE_STOP = b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+def _is_error_body(raw: bytes) -> bool:
+    """Return True if a non-streaming 200 body is a provider failure rather than a message."""
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        payload = None
+    if isinstance(payload, dict) and payload.get("type") == "message":
+        return False
+    return _is_error_text(raw.decode(errors="replace").lower())
 
 
-def _sanitize_sse_payload(raw: bytes) -> bytes:
-    """Remove provider failure frames and terminate a buffered stream cleanly."""
-    output = bytearray()
-    remaining = raw
-    while remaining:
-        match = re.search(rb"\r?\n\r?\n", remaining)
-        if match is None:
-            if not _is_provider_error_frame(remaining):
-                output.extend(remaining)
-            break
-        end = match.end()
-        frame = remaining[: match.start()]
-        if _is_provider_error_frame(frame):
-            output.extend(_SYNTHETIC_MESSAGE_STOP)
-            return bytes(output)
-        output.extend(remaining[:end])
-        remaining = remaining[end:]
-    return bytes(output)
+def _first_error_frame(raw: bytes, *, complete: bool) -> Optional[str]:
+    """Return the first SSE frame in ``raw`` that is a provider failure, lowered.
+
+    A trailing frame without its separator is only inspected once ``complete`` says no more bytes will arrive.
+    """
+    frames = _SSE_FRAME_SEPARATOR.split(raw)
+    if not complete:
+        frames = frames[:-1]
+    for frame in frames:
+        lowered = frame.decode(errors="replace").lower()
+        if _is_error_text(lowered):
+            return lowered
+    return None
 
 
-async def _iter_sanitized_sse(response: httpx.Response):
-    """Stream SSE frames without ever forwarding provider error events."""
+async def _iter_sse_frames(response: httpx.Response):
+    """Re-chunk an SSE stream into whole frames so each can be rewritten independently."""
     buffer = bytearray()
     async for chunk in response.aiter_bytes():
         buffer.extend(chunk)
         while True:
-            match = re.search(rb"\r?\n\r?\n", buffer)
+            match = _SSE_FRAME_SEPARATOR.search(buffer)
             if match is None:
                 break
             end = match.end()
-            frame = bytes(buffer[: match.start()])
-            separator = match.group(0)
+            frame = bytes(buffer[:end])
             del buffer[:end]
-            if _is_provider_error_frame(frame):
-                yield _SYNTHETIC_MESSAGE_STOP
-                return
-            yield bytes(frame) + separator
-    if buffer and not _is_provider_error_frame(bytes(buffer)):
+            yield frame
+    if buffer:
         yield bytes(buffer)
 
 
@@ -431,19 +432,18 @@ async def _prepare_candidate(candidate: httpx.Response):
     reasonable confidence the upstream will produce output.  This function
     buffers SSE frames and keeps reading until one of three outcomes:
 
-    1. An **output-delta** event is seen  -> the model is generating; start
-       streaming (return ``capacity_error=False``).
-    2. A **response.failed** / capacity phrase is seen *without* any output
-       delta  -> the request failed before generating; the caller can safely
-       retry on the next account (``capacity_error=True``).
+    1. A complete frame is a provider error (``"type":"error"`` /
+       ``response.failed``) -> nothing has reached the client, so the caller
+       retries on the next account.  Capacity phrases inside that error frame
+       mark it as a capacity error (longer cooldown).
+    2. An **output-delta** or completion event is seen -> the model is
+       generating; start streaming.
     3. A safety bound is reached (64 KB or 90 s total prefetch time) without
        either signal -> treat this attempt as failed and rotate accounts.
 
-    The original bug forwarded buffered keepalives after a prefix timeout;
-    the provider could then emit a late failure/capacity event directly to the
-    CLI, ending the user's run instead of triggering account failover. We now
-    hold the stream until real output/completion and rotate on any pre-output
-    timeout or terminal failure.
+    Phrases inside model output never count as failures.  Once streaming has
+    started, a provider error frame is forwarded to the client unchanged, so
+    the client sees the failure instead of a truncated response.
     """
     if candidate.status_code != 200:
         return candidate
@@ -456,33 +456,23 @@ async def _prepare_candidate(candidate: httpx.Response):
 
     if not is_sse:
         raw = await candidate.aread()
-        lowered = raw.decode(errors="replace").lower()
 
         if raw.lstrip().startswith((b"event:", b"data:")):
             is_sse = True
         else:
-            candidate.extensions["proxy_capacity_error"] = any(p in lowered for p in _CAPACITY_PHRASES)
-            candidate.extensions["proxy_pre_output_failure"] = _is_pre_output_failure(lowered)
+            is_error = _is_error_body(raw)
+            candidate.extensions["proxy_capacity_error"] = is_error and _is_capacity_text(raw.decode(errors="replace").lower())
+            candidate.extensions["proxy_pre_output_failure"] = is_error
             return candidate
 
     if is_sse and hasattr(candidate, "_content") and candidate._content:
-        lowered = candidate._content.decode(errors="replace").lower()
-        is_capacity_error = any(p in lowered for p in _CAPACITY_PHRASES)
-        is_pre_output_failure = _is_pre_output_failure(lowered)
-        if is_capacity_error:
-            return _PrefetchedResponse(
-                candidate,
-                candidate._content,
-                _empty_aiter(),
-                True,
-                is_pre_output_failure,
-            )
+        error_frame = _first_error_frame(candidate._content, complete=True)
         return _PrefetchedResponse(
             candidate,
             candidate._content,
             _empty_aiter(),
-            False,
-            is_pre_output_failure,
+            error_frame is not None and _is_capacity_text(error_frame),
+            error_frame is not None,
         )
 
     iterator = candidate.aiter_bytes().__aiter__()
@@ -511,31 +501,22 @@ async def _prepare_candidate(candidate: httpx.Response):
             logger.warning("Upstream produced no output within the SSE prefetch timeout; treating as capacity unavailable")
             return _PrefetchedResponse(candidate, bytes(prefix), iterator, False, True)
         prefix.extend(chunk)
-        lowered = bytes(prefix).decode(errors="replace").lower()
-
-        # Explicit capacity phrases -> always retry.
-        if any(p in lowered for p in _CAPACITY_PHRASES):
-            return _PrefetchedResponse(
-                candidate,
-                bytes(prefix),
-                iterator,
-                True,
-                _is_pre_output_failure(lowered),
-            )
-
-        has_output = any(m in lowered for m in _OUTPUT_DELTA_MARKERS)
-        completed = any(m in lowered for m in _SUCCESS_MARKERS)
-
-        # Real output is flowing -> response is healthy, start streaming.
-        if has_output or completed:
-            return _PrefetchedResponse(candidate, bytes(prefix), iterator, False, False)
 
         # Nothing has reached the client yet, so a terminal upstream failure is
-        # safe to retry on another account. The caller applies the short cooldown
+        # safe to retry on another account. The caller applies the cooldown
         # that prevents every concurrent request from piling onto this account.
-        if _is_pre_output_failure(lowered):
-            return _PrefetchedResponse(candidate, bytes(prefix), iterator, False, True)
+        error_frame = _first_error_frame(bytes(prefix), complete=False)
+        if error_frame is not None:
+            return _PrefetchedResponse(candidate, bytes(prefix), iterator, _is_capacity_text(error_frame), True)
 
+        # Real output is flowing -> response is healthy, start streaming.
+        lowered = bytes(prefix).decode(errors="replace").lower()
+        if any(m in lowered for m in _OUTPUT_DELTA_MARKERS + _SUCCESS_MARKERS):
+            return _PrefetchedResponse(candidate, bytes(prefix), iterator, False, False)
+
+    error_frame = _first_error_frame(bytes(prefix), complete=True)
+    if error_frame is not None:
+        return _PrefetchedResponse(candidate, bytes(prefix), iterator, _is_capacity_text(error_frame), True)
     logger.warning("Upstream filled the SSE prefetch buffer without producing output; treating as capacity unavailable")
     return _PrefetchedResponse(candidate, bytes(prefix), iterator, False, True)
 
@@ -1222,8 +1203,6 @@ async def proxy_messages(
     if resp.status_code >= 400 or "text/event-stream" not in content_type:
         raw = await resp.aread()
         await resp.aclose()
-        if "text/event-stream" in content_type or raw.lstrip().startswith((b"event:", b"data:")):
-            raw = _sanitize_sse_payload(raw)
         raw = _restore_requested_model_in_error(raw, resp.status_code, requested_model, request_model)
 
         if not is_count_tokens:
@@ -1263,7 +1242,7 @@ async def proxy_messages(
 
     async def stream_body():
         try:
-            async for chunk in _iter_sanitized_sse(resp):
+            async for chunk in _iter_sse_frames(resp):
                 accumulator.feed(chunk)
                 yield _restore_requested_model_in_sse_frame(chunk, requested_model)
         finally:

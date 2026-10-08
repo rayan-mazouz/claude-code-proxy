@@ -439,6 +439,108 @@ def test_proxy_fails_over_on_streamed_capacity_event(client, seed_account, make_
 
 
 @respx.mock
+def test_model_text_mentioning_capacity_is_not_a_provider_failure(client, seed_account, make_user):
+    from app.utils.models.api import AccountStatus
+    from app.utils.postgres import AccountDb
+    from app.utils.postgres.base import SessionFactory
+
+    first_id = seed_account("chatty-first")
+    seed_account("chatty-second")
+    key = make_user("chatty-user")
+    text = 'The cluster is at capacity; try a different model. Logged \\"type\\":\\"error\\" and response.failed.'
+    sse = (
+        'event: message_start\ndata: {"type":"message_start","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":5}}}\n\n'
+        f'event: content_block_delta\ndata: {{"type":"content_block_delta","index":0,"delta":{{"type":"text_delta","text":"{text}"}}}}\n\n'
+        'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":9}}\n\n'
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+    )
+    message = {
+        "type": "message",
+        "model": "claude-haiku-4-5",
+        "content": [{"type": "text", "text": "The cluster is at capacity; response.failed was logged."}],
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+
+    respx.route(host="testserver").pass_through()
+    route = respx.post(ANTHROPIC_MESSAGES).mock(
+        side_effect=[
+            httpx.Response(200, headers={"content-type": "text/event-stream"}, text=sse),
+            httpx.Response(200, json=message),
+        ]
+    )
+    headers = {"Authorization": f"Bearer {key}"}
+
+    streamed = client.post("/api/v1/messages", headers=headers, json={"model": "claude-haiku-4-5", "stream": True})
+    assert streamed.status_code == 200
+    assert "try a different model" in streamed.text
+    assert streamed.text.count("message_stop") == 2  # event name + payload of the one real stop frame
+
+    plain = client.post("/api/v1/messages", headers=headers, json={"model": "claude-haiku-4-5"})
+    assert plain.status_code == 200
+    assert plain.json()["content"][0]["text"] == message["content"][0]["text"]
+
+    assert len(route.calls) == 2
+    with SessionFactory() as db:
+        assert db.get(AccountDb, first_id).status == AccountStatus.ACTIVE
+
+
+def _streaming_response(*frames: str) -> httpx.Response:
+    async def body():
+        for frame in frames:
+            yield frame.encode()
+
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body())
+
+
+def test_prefetch_starts_stream_when_output_mentions_capacity():
+    import asyncio
+
+    from app.routes.proxy import _prepare_candidate
+
+    prepared = asyncio.run(
+        _prepare_candidate(
+            _streaming_response(
+                'event: message_start\ndata: {"type":"message_start","message":{}}\n\n'
+                'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"text":"temporarily overloaded"}}\n\n',
+            )
+        )
+    )
+    assert prepared._proxy_capacity_error is False
+    assert prepared._proxy_pre_output_failure is False
+
+
+def test_prefetch_retries_an_error_frame_before_anything_is_sent():
+    import asyncio
+
+    from app.routes.proxy import _prepare_candidate
+
+    prepared = asyncio.run(
+        _prepare_candidate(
+            _streaming_response(
+                'event: message_start\ndata: {"type":"message_start","message":{}}\n\n'
+                'event: error\ndata: {"type":"error","error":{"message":"Selected model is at capacity."}}\n\n',
+            )
+        )
+    )
+    assert prepared._proxy_capacity_error is True
+    assert prepared._proxy_pre_output_failure is True
+
+
+def test_midstream_error_frame_is_forwarded_not_replaced_with_a_stop():
+    import asyncio
+
+    from app.routes.proxy import _iter_sse_frames
+
+    delta = 'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"text":"partial"}}\n\n'
+    error = 'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n'
+
+    async def collect():
+        return [frame async for frame in _iter_sse_frames(_streaming_response(delta[:20], delta[20:] + error))]
+
+    assert asyncio.run(collect()) == [delta.encode(), error.encode()]
+
+
+@respx.mock
 def test_refresh_quota_reports_rate_limit_cleanly(client, admin_headers, seed_account, monkeypatch):
     # A persistently rate-limited probe must return a friendly, actionable message -- not a raw httpx 429 string.
     from app.utils import oauth
