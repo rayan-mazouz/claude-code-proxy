@@ -888,7 +888,7 @@ async def proxy_messages(
             if candidate.status_code == 401:
                 await candidate.aclose()
                 connection = egress.get_pool().acquire(account.egress_target_id, priority=user.priority)
-                access_token = rotation.ensure_fresh_token(db, account, force_refresh=True, egress_target=connection.target)
+                access_token = rotation.ensure_fresh_token(db, account, rejected_token=access_token, egress_target=connection.target)
                 candidate = await _send_with_account_limit(
                     connection,
                     request.method,

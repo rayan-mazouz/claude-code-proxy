@@ -167,20 +167,29 @@ def select_account(
     return chosen
 
 
+def _stored_access_token(db: Session, account: AccountDb) -> str:
+    try:
+        return crypto.decrypt(account.access_token_enc)
+    except Exception as exc:
+        provider_health.persist_failure(db, account.id, exc, context="credential_decrypt")
+        raise provider_health.reauthentication_error() from exc
+
+
 def ensure_fresh_token(
     db: Session,
     account: AccountDb,
     *,
-    force_refresh: bool = False,
+    rejected_token: Optional[str] = None,
     egress_target=None,
 ) -> str:
     """Return a usable access token, serializing refresh-token rotation in the database.
 
-    ``force_refresh`` is used after an upstream 401.  The provider can revoke an
-    access token before its JWT expiry, so callers must be able to refresh it
-    without writing a synthetic expiry into the account row.  Keeping that
-    decision inside the row lock prevents a stale request from clobbering a
-    concurrently rotated token/expiry.
+    ``rejected_token`` is the access token an upstream 401 just rejected. The
+    provider can revoke an access token before its JWT expiry, so that token is
+    refreshed regardless of expiry -- unless a concurrent request already
+    replaced it, in which case the replacement is returned. The row is re-read
+    from the database under the lock, so a refresh always spends the latest
+    refresh token rather than one another worker has already rotated.
     """
     if account.provider_health == ProviderHealth.REAUTH_REQUIRED:
         raise provider_health.reauthentication_error()
@@ -190,23 +199,24 @@ def ensure_fresh_token(
     expires_at = account.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if not force_refresh and expires_at - leeway > now:
-        try:
-            return crypto.decrypt(account.access_token_enc)
-        except Exception as exc:
-            provider_health.persist_failure(db, account.id, exc, context="credential_decrypt")
-            raise provider_health.reauthentication_error() from exc
+    if rejected_token is None and expires_at - leeway > now:
+        return _stored_access_token(db, account)
 
-    locked = db.query(AccountDb).filter(AccountDb.id == account.id).with_for_update().one()
-    locked_expiry = locked.expires_at
-    if locked_expiry.tzinfo is None:
-        locked_expiry = locked_expiry.replace(tzinfo=timezone.utc)
-    if not force_refresh and locked_expiry - leeway > now:
-        try:
-            return crypto.decrypt(locked.access_token_enc)
-        except Exception as exc:
-            provider_health.persist_failure(db, account.id, exc, context="credential_decrypt")
-            raise provider_health.reauthentication_error() from exc
+    # populate_existing() discards unflushed changes on the identity-mapped row, so flush them first.
+    db.flush()
+    locked = db.query(AccountDb).filter(AccountDb.id == account.id).with_for_update().populate_existing().one()
+    if locked.provider_health == ProviderHealth.REAUTH_REQUIRED:
+        raise provider_health.reauthentication_error()
+    if rejected_token is None:
+        locked_expiry = locked.expires_at
+        if locked_expiry.tzinfo is None:
+            locked_expiry = locked_expiry.replace(tzinfo=timezone.utc)
+        if locked_expiry - leeway > now:
+            return _stored_access_token(db, locked)
+    else:
+        current = _stored_access_token(db, locked)
+        if current != rejected_token:
+            return current
 
     try:
         refresh_plain = crypto.decrypt(locked.refresh_token_enc)
