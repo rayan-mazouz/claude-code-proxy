@@ -187,6 +187,7 @@ def create_user(
         active=True,
         priority=request.priority,
         fallback_enabled=request.fallback_enabled,
+        spare_capacity_only=request.spare_capacity_only,
         rate_limit_per_minute=request.rate_limit_per_minute,
         rate_limit_per_hour=request.rate_limit_per_hour,
         rate_limit_per_day=request.rate_limit_per_day,
@@ -283,6 +284,8 @@ def update_user(
         user.priority = request.priority
     if request.fallback_enabled is not None:
         user.fallback_enabled = request.fallback_enabled
+    if request.spare_capacity_only is not None:
+        user.spare_capacity_only = request.spare_capacity_only
     if request.rate_limit_per_minute is not None:
         user.rate_limit_per_minute = request.rate_limit_per_minute
     if request.rate_limit_per_hour is not None:

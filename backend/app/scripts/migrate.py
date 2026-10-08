@@ -96,6 +96,8 @@ def sync_canonical_schema() -> None:
         for column_name, column_type in warmup_columns.items():
             if column_name not in account_columns:
                 connection.execute(text(f"ALTER TABLE accounts ADD COLUMN {column_name} {column_type}"))
+        if "spare_capacity_tracking_json" not in account_columns:
+            connection.execute(text("ALTER TABLE accounts ADD COLUMN spare_capacity_tracking_json TEXT NOT NULL DEFAULT '{}'"))
 
         # Automatic egress rotation is intentionally disabled. Persist the
         # first enabled configured target for every account so restored or
@@ -116,6 +118,7 @@ def sync_canonical_schema() -> None:
         user_additions = {
             "priority": "INTEGER NOT NULL DEFAULT 1",
             "fallback_enabled": "BOOLEAN NOT NULL DEFAULT FALSE",
+            "spare_capacity_only": "BOOLEAN NOT NULL DEFAULT FALSE",
             "lifetime_token_budget": "BIGINT",
             "monthly_spend_budget_usd": "DOUBLE PRECISION",
             "lifetime_spend_budget_usd": "DOUBLE PRECISION",

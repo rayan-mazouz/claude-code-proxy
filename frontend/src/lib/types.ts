@@ -360,6 +360,8 @@ export interface User {
     active: boolean;
     priority: number;
     fallback_enabled: boolean;
+    // Only uses quota that other users are not projected to need.
+    spare_capacity_only: boolean;
     key_count: number;
     // requests/min across all the user's keys; null/0 = no user-level cap.
     rate_limit_per_minute: number | null;

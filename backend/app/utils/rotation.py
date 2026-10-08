@@ -10,7 +10,7 @@ from typing import Mapping, Optional, Set
 from sqlalchemy.orm import Session
 
 from app import config
-from app.utils import crypto, oauth, provider_health
+from app.utils import crypto, oauth, provider_health, spare_capacity
 from app.utils.models.api import AccountStatus, ProviderHealth
 from app.utils.postgres import AccountDb, UserDb
 
@@ -139,10 +139,12 @@ def preview_account(
     user: Optional[UserDb] = None,
     exclude_ids: Optional[Set[uuid.UUID]] = None,
 ) -> Optional[AccountDb]:
-    """Return the highest-priority account that is currently able to serve traffic."""
-    del user
+    """Return the highest-priority account that is currently able to serve traffic for ``user``."""
     exclude_ids = exclude_ids or set()
-    candidates = [a for a in db.query(AccountDb).all() if a.id not in exclude_ids and is_available(a)]
+    now = datetime.now(timezone.utc)
+    candidates = [a for a in db.query(AccountDb).all() if a.id not in exclude_ids and is_available(a, now)]
+    if user is not None and user.spare_capacity_only:
+        candidates = [a for a in candidates if spare_capacity.allows(a, now)]
     if not candidates:
         return None
 

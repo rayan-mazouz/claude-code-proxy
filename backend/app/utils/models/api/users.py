@@ -69,6 +69,7 @@ class User(BaseModel):
     active: bool
     priority: int
     fallback_enabled: bool
+    spare_capacity_only: bool  # only uses quota other users are not projected to need
     key_count: int
     rate_limit_per_minute: Optional[int]  # requests/min across all the user's keys; null/0 = unlimited
     rate_limit_per_hour: Optional[int]  # requests/hour across all keys; null/0 = unlimited
@@ -113,6 +114,7 @@ class User(BaseModel):
             active=user_db.active,
             priority=user_db.priority,
             fallback_enabled=user_db.fallback_enabled,
+            spare_capacity_only=user_db.spare_capacity_only,
             key_count=key_count,
             rate_limit_per_minute=user_db.rate_limit_per_minute,
             rate_limit_per_hour=user_db.rate_limit_per_hour,
@@ -202,6 +204,7 @@ class CreateUserRequest(BaseModel):
     name: str
     priority: int = Field(default=1, ge=1, le=1000)
     fallback_enabled: bool = False
+    spare_capacity_only: bool = False
     rate_limit_per_minute: Optional[int] = Field(default=None, ge=0)  # null/0 = unlimited
     rate_limit_per_hour: Optional[int] = Field(default=None, ge=0)
     rate_limit_per_day: Optional[int] = Field(default=None, ge=0)
@@ -251,6 +254,7 @@ class UpdateUserRequest(BaseModel):
     active: Optional[bool] = None
     priority: Optional[int] = Field(default=None, ge=1, le=1000)
     fallback_enabled: Optional[bool] = None
+    spare_capacity_only: Optional[bool] = None
     rate_limit_per_minute: Optional[int] = Field(default=None, ge=0)
     rate_limit_per_hour: Optional[int] = Field(default=None, ge=0)
     rate_limit_per_day: Optional[int] = Field(default=None, ge=0)

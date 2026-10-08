@@ -12,6 +12,7 @@ import { RequestCaptureOverlay } from "@/components/RequestCaptureOverlay";
 const EVENT_TYPES = [
     "request.received",
     "request.exhausted",
+    "request.spare_capacity_throttled",
     "account.attempt",
     "account.busy",
     "account.capacity",
@@ -43,7 +44,7 @@ const REFRESH_SECS_KEY = "dashboard_refresh_secs";
 const rowTone = (type: string) =>
     type.includes("exhausted") || type.includes("error") || type.includes("capacity")
         ? "bg-bad-500/10 hover:bg-bad-500/15"
-        : type.includes("cooldown") || type.includes("rate_limited")
+        : type.includes("cooldown") || type.includes("rate_limited") || type.includes("throttled")
           ? "bg-warn-500/10 hover:bg-warn-500/15"
           : type.includes("response_received") || type.includes("returned")
             ? "bg-good-500/10 hover:bg-good-500/15"

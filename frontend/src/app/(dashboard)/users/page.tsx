@@ -1314,6 +1314,7 @@ function CreateUserModal({
     const [name, setName] = useState("");
     const [priority, setPriority] = useState("1");
     const [fallbackEnabled, setFallbackEnabled] = useState(false);
+    const [spareCapacityOnly, setSpareCapacityOnly] = useState(false);
     const [rate, setRate] = useState("");
     const [hourlyRate, setHourlyRate] = useState("");
     const [dailyRate, setDailyRate] = useState("");
@@ -1352,6 +1353,7 @@ function CreateUserModal({
             const user = await api.createUser(name.trim(), {
                 priority: Number(priority) || 1,
                 fallback_enabled: fallbackEnabled,
+                spare_capacity_only: spareCapacityOnly,
                 rate_limit_per_minute: parseLimitInput(rate),
                 rate_limit_per_hour: parseLimitInput(hourlyRate),
                 rate_limit_per_day: parseLimitInput(dailyRate),
@@ -1414,6 +1416,10 @@ function CreateUserModal({
                         />
                         Allow API fallback providers
                     </label>
+                    <SpareCapacityToggle
+                        checked={spareCapacityOnly}
+                        onChange={setSpareCapacityOnly}
+                    />
                 </div>
 
                 <Field label="Policy preset">
@@ -1571,6 +1577,7 @@ function EditUserModal({
     const [active, setActive] = useState(user.active);
     const [priority, setPriority] = useState(String(user.priority ?? 1));
     const [fallbackEnabled, setFallbackEnabled] = useState(user.fallback_enabled ?? true);
+    const [spareCapacityOnly, setSpareCapacityOnly] = useState(user.spare_capacity_only ?? false);
     const [rate, setRate] = useState(
         user.rate_limit_per_minute ? String(user.rate_limit_per_minute) : "",
     );
@@ -1636,6 +1643,7 @@ function EditUserModal({
                 active,
                 priority: Number(priority) || 1,
                 fallback_enabled: fallbackEnabled,
+                spare_capacity_only: spareCapacityOnly,
                 rate_limit_per_minute: parseLimitInput(rate) ?? 0,
                 rate_limit_per_hour: parseLimitInput(hourlyRate) ?? 0,
                 rate_limit_per_day: parseLimitInput(dailyRate) ?? 0,
@@ -1699,6 +1707,10 @@ function EditUserModal({
                         />
                         Allow API fallback providers
                     </label>
+                    <SpareCapacityToggle
+                        checked={spareCapacityOnly}
+                        onChange={setSpareCapacityOnly}
+                    />
                 </div>
 
                 <UserRateLimitFields
@@ -2013,5 +2025,31 @@ function KeyRevealModal({
                 </div>
             </div>
         </Modal>
+    );
+}
+
+function SpareCapacityToggle({
+    checked,
+    onChange,
+}: {
+    checked: boolean;
+    onChange: (checked: boolean) => void;
+}) {
+    return (
+        <label className="border-ink-700 bg-ink-900/50 text-fog-200 flex items-start gap-2.5 rounded-md border px-3 py-2.5 text-sm">
+            <input
+                type="checkbox"
+                checked={checked}
+                onChange={(e) => onChange(e.target.checked)}
+                className="accent-brand-500 mt-0.5 h-4 w-4 shrink-0"
+            />
+            <span>
+                Only use spare capacity
+                <span className="text-fog-400 block text-xs">
+                    Holds back what everyone else, including use outside the proxy, is on pace to
+                    use in each 5-hour and weekly window.
+                </span>
+            </span>
+        </label>
     );
 }

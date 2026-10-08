@@ -92,6 +92,9 @@ class AccountDb(DatabaseBase):
     warmup_last_at = Column(DateTime(timezone=True), nullable=True)
     warmup_last_status = Column(VARCHAR(32), nullable=True)
     warmup_last_error = Column(Text, nullable=True)
+    # Per quota window: usage last observed by the quota refresher and how much of it other (non-spare-capacity)
+    # users caused. Maintained by utils/spare_capacity.observe.
+    spare_capacity_tracking_json = Column(Text, nullable=False, default="{}", server_default="{}")
     created_at = Column(DateTime(timezone=True), nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=False)
 
@@ -113,6 +116,8 @@ class UserDb(DatabaseBase):
     active = Column(Boolean, nullable=False)
     priority = Column(Integer, nullable=False, default=1, server_default="1")
     fallback_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
+    # Route this user only to quota that other users are not projected to need (see utils/spare_capacity.py).
+    spare_capacity_only = Column(Boolean, nullable=False, default=False, server_default="false")
     # max requests/min across ALL of this user's keys; unlike keys (where null = global default), users have NO
     # global default -- null/0 = no user-level cap (unlimited).
     rate_limit_per_minute = Column(Integer, nullable=True)

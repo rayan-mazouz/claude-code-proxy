@@ -130,11 +130,11 @@ def seed_account():
 
 @pytest.fixture
 def make_user(client, admin_headers):
-    def _make(name: str = "user", *, fallback_enabled: bool = False) -> str:
+    def _make(name: str = "user", *, fallback_enabled: bool = False, spare_capacity_only: bool = False) -> str:
         created = client.post(
             "/api/v1/users",
             headers=admin_headers,
-            json={"name": name, "fallback_enabled": fallback_enabled},
+            json={"name": name, "fallback_enabled": fallback_enabled, "spare_capacity_only": spare_capacity_only},
         )
         assert created.status_code == 201, created.text
         user_id = created.json()["user"]["id"]

@@ -76,6 +76,7 @@ def upgrade() -> None:
         sa.Column("warmup_last_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("warmup_last_status", sa.VARCHAR(length=32), nullable=True),
         sa.Column("warmup_last_error", sa.Text(), nullable=True),
+        sa.Column("spare_capacity_tracking_json", sa.Text(), nullable=False, server_default="{}"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id", name="pk_accounts_id"),
@@ -107,6 +108,7 @@ def upgrade() -> None:
         # Fallback is opt-in; migration 004 changed the historical default to
         # false, so fresh databases must start with the same safe behavior.
         sa.Column("fallback_enabled", sa.Boolean(), nullable=False, server_default="false"),
+        sa.Column("spare_capacity_only", sa.Boolean(), nullable=False, server_default="false"),
         sa.Column("rate_limit_per_minute", sa.Integer(), nullable=True),
         sa.Column("rate_limit_per_hour", sa.Integer(), nullable=True),
         sa.Column("rate_limit_per_day", sa.Integer(), nullable=True),

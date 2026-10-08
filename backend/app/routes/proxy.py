@@ -33,6 +33,7 @@ from app.utils import (
     request_policy,
     rotation,
     security,
+    spare_capacity,
     usage,
     warmup,
 )
@@ -579,18 +580,33 @@ def _archive_usage(request: Request, usage_obj: usage.Usage) -> None:
     )
 
 
-async def _send_with_account_limit(connection, method, url, headers, content, account, priority, model=None):
+def _spare_capacity_activity(request: Request, user: UserDb, account: AccountDb):
+    """Return a marker recording when a spare-capacity user's request runs on ``account``; None for other users."""
+    if not user.spare_capacity_only:
+        return None
+
+    def mark(event_type: str) -> None:
+        _emit_event(request, event_type, user_id=user.id, account_id=account.id)
+
+    return mark
+
+
+async def _send_with_account_limit(connection, method, url, headers, content, account, priority, model=None, activity=None):
     try:
         lease = account_limiter.try_acquire(account.id, settings.concurrency_limit_for(model, getattr(account, "tier", None)), priority)
     except Exception:
         await connection.aclose()
         raise
+    if activity is not None:
+        activity(spare_capacity.REQUEST_STARTED)
     try:
         client = connection.client
         candidate = await _prepare_candidate(await client.send(client.build_request(method, url, headers=headers, content=content), stream=True))
     except Exception:
         lease.release()
         await connection.aclose()
+        if activity is not None:
+            activity(spare_capacity.REQUEST_FINISHED)
         raise
     original_aclose = candidate.aclose
     candidate.extensions["proxy_egress_target"] = connection.target
@@ -601,6 +617,8 @@ async def _send_with_account_limit(connection, method, url, headers, content, ac
         finally:
             lease.release()
             await connection.aclose()
+            if activity is not None:
+                activity(spare_capacity.REQUEST_FINISHED)
 
     candidate.aclose = close_with_lease
     return candidate
@@ -822,6 +840,7 @@ async def proxy_messages(
     resp = None
     chosen_id = None
     chosen_fallback_id = None
+    spare_capacity_throttled = False
 
     # Priority routing always walks the whole pool before declaring exhaustion.
     max_attempts = db.query(AccountDb).count()
@@ -832,6 +851,10 @@ async def proxy_messages(
     for _ in range(max_attempts + pool_wait_slots):
         account = rotation.select_account(db, user, exclude_ids)
         if account is None:
+            if user.spare_capacity_only and rotation.preview_account(db, None, exclude_ids) is not None:
+                # Accounts can still serve other users; only this user's spare-capacity share is used up.
+                spare_capacity_throttled = True
+                break
             # Give cooldown and quota-refresh workers time to return an account
             # before exposing a temporary pool failure to the client.
             now_monotonic = asyncio.get_running_loop().time()
@@ -869,6 +892,7 @@ async def proxy_messages(
                 account,
                 user.priority,
                 request_model,
+                activity=_spare_capacity_activity(request, user, account),
             )
             connection = None
             if candidate.status_code == 401:
@@ -884,6 +908,7 @@ async def proxy_messages(
                     account,
                     user.priority,
                     request_model,
+                    activity=_spare_capacity_activity(request, user, account),
                 )
                 connection = None
                 if candidate.status_code == 401:
@@ -1156,6 +1181,21 @@ async def proxy_messages(
                 status_code=candidate.status_code,
             )
             break
+
+    if resp is None and spare_capacity_throttled:
+        _emit_event(
+            request,
+            "request.spare_capacity_throttled",
+            user_id=user_id,
+            api_key_id=api_key_id,
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            message="Remaining capacity is reserved for other users",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="This key only uses spare capacity, and the remaining capacity is reserved for other users. Try again later.",
+            headers={"Retry-After": "60"},
+        )
 
     if resp is None or (chosen_id is None and chosen_fallback_id is None):
         _emit_event(

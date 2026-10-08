@@ -261,19 +261,12 @@ def spend_usage(
     return total
 
 
-def spend_usage_rollups(db: Session, group_column, group_ids) -> dict[uuid.UUID, tuple[float, float]]:
-    """Return total/month-to-date spend for many owners in two bounded queries.
+def effective_cost_expr():
+    """SQL expression for a usage row's API-equivalent USD cost: the frozen value, else priced from its tokens.
 
-    PostgreSQL aggregates frozen request costs; only legacy rows lacking a
-    frozen value are loaded for Python pricing. Lists therefore no longer scan
-    the full usage ledger twice for every card.
+    Pricing legacy rows in SQL as well as frozen rows keeps aggregate queries in the database even while old
+    request history is still being backfilled.
     """
-    ids = list(dict.fromkeys(group_ids))
-    if not ids:
-        return {}
-    start = month_start()
-    # Price legacy rows in SQL as well as frozen rows. This keeps list latency
-    # constant even while old request history is still being backfilled.
     sql_cost = case(
         *[
             (
@@ -297,7 +290,21 @@ def spend_usage_rollups(db: Session, group_column, group_ids) -> dict[uuid.UUID,
         ],
         else_=0.0,
     )
-    effective_cost = func.coalesce(UsageRecordDb.billed_cost_usd, sql_cost)
+    return func.coalesce(UsageRecordDb.billed_cost_usd, sql_cost)
+
+
+def spend_usage_rollups(db: Session, group_column, group_ids) -> dict[uuid.UUID, tuple[float, float]]:
+    """Return total/month-to-date spend for many owners in two bounded queries.
+
+    PostgreSQL aggregates frozen request costs; only legacy rows lacking a
+    frozen value are loaded for Python pricing. Lists therefore no longer scan
+    the full usage ledger twice for every card.
+    """
+    ids = list(dict.fromkeys(group_ids))
+    if not ids:
+        return {}
+    start = month_start()
+    effective_cost = effective_cost_expr()
     rows = (
         db.query(
             group_column,

@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repo-root .env, loaded for local development; in containers the values come from the process environment.
@@ -98,6 +98,10 @@ class Settings(BaseSettings):
     POOL_WAIT_POLL_INTERVAL_SECONDS: float = DEFAULT_POOL_WAIT_POLL_INTERVAL_SECONDS
     TRANSIENT_UPSTREAM_COOLDOWN_SECONDS: int = DEFAULT_TRANSIENT_UPSTREAM_COOLDOWN_SECONDS
     FALLBACK_GENERATION_CANARY_ENABLED: bool = True
+    # Share of each account's 5-hour / weekly window always held back from spare-capacity users, even when
+    # nobody else has used that window yet (0..1). See app/utils/spare_capacity.py.
+    SPARE_CAPACITY_FIVE_HOUR_FLOOR: float = Field(default=0.10, ge=0.0, le=1.0)
+    SPARE_CAPACITY_WEEKLY_FLOOR: float = Field(default=0.30, ge=0.0, le=1.0)
     FALLBACK_CANARY_MAX_OUTPUT_TOKENS: int = 1
 
     # Optional outbound paths. Each target is either a local source address or

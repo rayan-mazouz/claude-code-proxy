@@ -88,6 +88,11 @@ are the bottleneck now (pun intended).
   rewrites, thinking levels, request modes, and access policies.
 - Per-user monthly/lifetime token and spend budgets, plus per-key request/token
   limits and revocation.
+- Spare-capacity users (off by default): they are only routed to accounts with
+  quota left after reserving what everyone else is on pace to use in the
+  current 5-hour and weekly windows, and get HTTP 429 otherwise. Everyone
+  else's usage is measured from the accounts' real usage, so it includes use
+  outside the proxy (e.g. claude.ai on the same account).
 - Hashed API keys and Fernet-encrypted OAuth/fallback credentials.
 
 ### Team access
