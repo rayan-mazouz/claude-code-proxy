@@ -532,7 +532,7 @@ export const api = {
             body: {
                 name,
                 priority: opts.priority ?? 1,
-                fallback_enabled: opts.fallback_enabled ?? false,
+                fallback_enabled: opts.fallback_enabled,
                 spare_capacity_only: opts.spare_capacity_only ?? false,
                 rate_limit_per_minute: opts.rate_limit_per_minute ?? null,
                 rate_limit_per_hour: opts.rate_limit_per_hour ?? null,

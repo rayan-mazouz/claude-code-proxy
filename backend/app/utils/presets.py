@@ -3,6 +3,7 @@
 import json
 
 POLICY_COLUMNS = {
+    "fallback_enabled": "fallback_enabled",
     "allowed_models": "allowed_models_json",
     "allowed_thinking_levels": "allowed_thinking_levels",
     "allowed_thinking_modes": "allowed_thinking_modes_json",

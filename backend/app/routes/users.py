@@ -284,6 +284,7 @@ def update_user(
         user.priority = request.priority
     if request.fallback_enabled is not None:
         user.fallback_enabled = request.fallback_enabled
+        _track_policy_override(db, user, "fallback_enabled")
     if request.spare_capacity_only is not None:
         user.spare_capacity_only = request.spare_capacity_only
     if request.rate_limit_per_minute is not None:

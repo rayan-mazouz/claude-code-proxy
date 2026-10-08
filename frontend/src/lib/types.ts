@@ -342,6 +342,7 @@ export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 export type ThinkingMode = "disabled" | "enabled" | "adaptive";
 
 export interface Preset {
+    fallback_enabled: boolean;
     id: string;
     name: string;
     user_count: number;

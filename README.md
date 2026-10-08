@@ -439,3 +439,14 @@ traffic; deploy app changes through blue-green and keep one Traefik.
 ### Context-window policy
 
 Presets and users include an **Allow extended context window** policy switch. It is disabled by default and available as a per-user override. The migration explicitly enables it for the existing user `Devasheesh`; provider-specific context capabilities remain negotiated by the upstream endpoint.
+
+### Pool exhaustion and reset credits
+
+Weekly-exhausted Claude accounts yield to remaining available pooled accounts.
+The Claude provider integration has no banked reset-credit redemption API, so
+this proxy never invents or automatically claims a reset. Requests retain
+normal failover and bounded pool waiting; provider quotas recover through
+natural resets. The paired Codex proxy uses reset credits only as a last
+resort after model-compatible account capacity is exhausted.
+
+Presets include **Allow API fallback providers**. Users inherit this setting unless they select a per-user fallback override. Clearing the override restores preset inheritance. The migration preserves existing user fallback permissions.

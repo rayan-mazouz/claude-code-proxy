@@ -231,3 +231,10 @@ def test_usage_probe_clears_rolling_cold_five_hour_placeholder(seed_account):
 
         assert account.session_used_pct == 0.0
         assert account.session_reset_at is None
+
+
+def test_weekly_exhausted_account_yields_to_remaining_pool(seed_account):
+    seed_account("weekly-full", weekly_used_pct=1.0)
+    remaining = seed_account("remaining", weekly_used_pct=0.4)
+    with SessionFactory() as db:
+        assert rotation.select_account(db).id == remaining

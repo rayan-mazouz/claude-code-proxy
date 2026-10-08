@@ -19,6 +19,7 @@ THINKING_MODES = ("disabled", "enabled", "adaptive")
 
 
 class PresetPayload(BaseModel):
+    fallback_enabled: bool = False
     name: str = Field(min_length=1, max_length=120)
     allowed_models: list[str] | None = Field(default=None, min_length=1)
     allowed_thinking_levels: list[str] = Field(default_factory=lambda: list(THINKING_LEVELS), min_length=1)
@@ -74,6 +75,7 @@ def _data(row):
     return {
         "id": row.id,
         "name": row.name,
+        "fallback_enabled": bool(row.fallback_enabled),
         "allowed_models": json.loads(row.allowed_models_json) if row.allowed_models_json else None,
         "allowed_thinking_levels": row.allowed_thinking_levels,
         "allowed_thinking_modes": json.loads(row.allowed_thinking_modes_json),
@@ -86,6 +88,7 @@ def _data(row):
 
 def _write(row, payload):
     row.name = payload.name.strip()
+    row.fallback_enabled = payload.fallback_enabled
     row.allowed_models_json = json.dumps(payload.allowed_models, separators=(",", ":")) if payload.allowed_models is not None else None
     row.allowed_thinking_levels = payload.allowed_thinking_levels
     row.allowed_thinking_modes_json = json.dumps(payload.allowed_thinking_modes, separators=(",", ":"))

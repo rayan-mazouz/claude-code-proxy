@@ -261,6 +261,7 @@ function PresetModal({
     onSaved: () => void;
 }) {
     const [name, setName] = useState(preset?.name ?? "");
+    const [fallbackEnabled, setFallbackEnabled] = useState(preset?.fallback_enabled ?? false);
     const [allModels, setAllModels] = useState(preset?.allowed_models === null || !preset);
     const [allowedModels, setAllowedModels] = useState<string[]>(preset?.allowed_models ?? []);
     const [levels, setLevels] = useState<ThinkingLevel[]>(
@@ -276,7 +277,9 @@ function PresetModal({
     const [modelModes, setModelModes] = useState<Record<string, ThinkingMode[]>>(
         preset?.model_thinking_modes ?? {},
     );
-    const [allowExtendedContext, setAllowExtendedContext] = useState(preset?.allow_extended_context ?? false);
+    const [allowExtendedContext, setAllowExtendedContext] = useState(
+        preset?.allow_extended_context ?? false,
+    );
     const [useGlobalThinking, setUseGlobalThinking] = useState(
         !preset || Object.keys(preset.model_thinking_levels).length === 0,
     );
@@ -293,6 +296,7 @@ function PresetModal({
         try {
             const payload = {
                 name: name.trim(),
+                fallback_enabled: fallbackEnabled,
                 allowed_models: allModels ? null : allowedModels,
                 allowed_thinking_levels: levels,
                 allowed_thinking_modes: modes,
@@ -324,9 +328,29 @@ function PresetModal({
             widthClass="max-w-3xl"
         >
             <form onSubmit={(event) => void save(event)} className="space-y-5">
+                <label className="border-ink-700 bg-ink-900/50 text-fog-200 flex items-center gap-2.5 rounded-md border px-3 py-2.5 text-sm">
+                    <input
+                        type="checkbox"
+                        checked={fallbackEnabled}
+                        onChange={(event) => setFallbackEnabled(event.target.checked)}
+                        className="accent-brand-500 h-4 w-4 shrink-0"
+                    />
+                    Allow API fallback providers
+                </label>
                 <label className="border-ink-700 bg-ink-900/50 text-fog-200 flex items-start gap-2.5 rounded-md border px-3 py-2.5 text-sm">
-                    <input type="checkbox" checked={allowExtendedContext} onChange={(event) => setAllowExtendedContext(event.target.checked)} className="accent-brand-500 mt-0.5 h-4 w-4 shrink-0" />
-                    <span><span className="block">Allow extended context window</span><span className="text-fog-400 mt-0.5 block text-xs">Enable the provider&apos;s extended context mode for users assigned this preset.</span></span>
+                    <input
+                        type="checkbox"
+                        checked={allowExtendedContext}
+                        onChange={(event) => setAllowExtendedContext(event.target.checked)}
+                        className="accent-brand-500 mt-0.5 h-4 w-4 shrink-0"
+                    />
+                    <span>
+                        <span className="block">Allow extended context window</span>
+                        <span className="text-fog-400 mt-0.5 block text-xs">
+                            Enable the provider&apos;s extended context mode for users assigned this
+                            preset.
+                        </span>
+                    </span>
                 </label>
                 <Field label="Preset name">
                     <TextInput
