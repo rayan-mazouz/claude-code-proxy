@@ -28,6 +28,8 @@ set -uo pipefail  # deliberately NOT -e: every segment degrades to empty rather 
 # Claude Code pipes a session JSON object on stdin. Capture it (may be empty when run by hand).
 stdin_json="$(cat 2>/dev/null || true)"
 
+# Cache files live in a shared temp dir and hold pool data fetched with this user's key; keep them private.
+umask 077
 cachedir="${TMPDIR:-/tmp}"
 now="$(date +%s)"
 
@@ -97,7 +99,20 @@ if [ -n "$base" ] && [ -n "$token" ]; then
   usage_cache="${cachedir}/ccproxy-usage-$(id -u).json"
   umtime="$(stat -c %Y "$usage_cache" 2>/dev/null || stat -f %m "$usage_cache" 2>/dev/null || echo 0)"
   if [ ! -s "$usage_cache" ] || [ "$(( now - umtime ))" -ge 30 ]; then
-    curl -fsS --max-time 5 -H "Authorization: Bearer ${token}" "${base%/}/v1/me/usage" -o "$usage_cache" 2>/dev/null || true
+    # Never write directly to the cache: curl truncates its output file before
+    # connecting, so a transient outage would erase the last good pool value.
+    usage_tmp="${usage_cache}.tmp.$$"
+    usage_url="${base%/}"
+    case "$usage_url" in
+      */api/v1|*/v1) usage_url+="/me/usage" ;;
+      */api) usage_url+="/v1/me/usage" ;;
+      *) usage_url+="/v1/me/usage" ;;
+    esac
+    if curl -fsS --max-time 5 -H "Authorization: Bearer ${token}" "$usage_url" -o "$usage_tmp" 2>/dev/null; then
+      mv -f "$usage_tmp" "$usage_cache"
+    else
+      rm -f "$usage_tmp"
+    fi
   fi
   if [ -s "$usage_cache" ]; then
     s_pct="$(jq -r '.pool.five_hour.used_pct // empty' "$usage_cache" 2>/dev/null)"

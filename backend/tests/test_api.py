@@ -550,7 +550,8 @@ def test_me_usage_aggregates_active_pool_and_earliest_reset(client, seed_account
     weekly_reset_values = [datetime.fromisoformat(value.replace("Z", "+00:00")) for value in pool["weekly"]["reset_at"]]
     assert weekly_reset_values == [weekly_exhausted_reset, weekly_second_reset, weekly_first_reset]
     assert datetime.fromisoformat(pool["weekly"]["next_reset_at"].replace("Z", "+00:00")) == weekly_exhausted_reset
-    assert len(pool["accounts"]) == 4
+    # API-key holders only see pool aggregates, never which Anthropic logins back the pool.
+    assert "accounts" not in pool
 
 
 def test_me_usage_requires_key(client):

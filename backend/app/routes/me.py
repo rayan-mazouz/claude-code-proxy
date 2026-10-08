@@ -10,8 +10,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.utils import rotation, security, usage
-from app.utils.models.api import MeUsageResponse, PoolAccountStatus, PoolStatus, PoolWindow
+from app.utils import security, usage
+from app.utils.models.api import MeUsageResponse, PoolStatus, PoolWindow
 from app.utils.postgres import AccountDb, ApiKeyDb, UsageRecordDb, UserDb, get_db
 
 router = APIRouter(tags=["Me"], prefix="/me")
@@ -82,19 +82,6 @@ def build_pool_status(db: Session, now: datetime | None = None) -> PoolStatus | 
         account_count=len(active_accounts),
         five_hour=five_hour,
         weekly=weekly,
-        accounts=[
-            PoolAccountStatus(
-                id=account.id,
-                label=account.label,
-                email=account.account_email,
-                priority=account.priority,
-                five_hour_used_pct=account.session_used_pct,
-                five_hour_reset_at=account.session_reset_at,
-                weekly_used_pct=account.weekly_used_pct,
-                weekly_reset_at=account.weekly_reset_at,
-            )
-            for account in sorted(active_accounts, key=rotation.account_selection_key)
-        ],
     )
 
 

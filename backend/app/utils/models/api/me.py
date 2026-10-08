@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Optional
-from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -20,26 +19,12 @@ class PoolWindow(BaseModel):
     next_reset_at: Optional[datetime]
 
 
-class PoolAccountStatus(BaseModel):
-    """Per-account quota data included with the pool aggregate."""
-
-    id: UUID
-    label: str
-    email: Optional[str]
-    priority: int
-    five_hour_used_pct: Optional[float]
-    five_hour_reset_at: Optional[datetime]
-    weekly_used_pct: Optional[float]
-    weekly_reset_at: Optional[datetime]
-
-
 class PoolStatus(BaseModel):
-    """Average rate-limit headroom plus per-account details for the available pool."""
+    """Average rate-limit headroom for the available pool."""
 
     account_count: int
     five_hour: PoolWindow
     weekly: PoolWindow
-    accounts: list[PoolAccountStatus]
 
 
 class MeUsageResponse(BaseModel):

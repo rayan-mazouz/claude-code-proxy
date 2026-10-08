@@ -26,7 +26,7 @@ from .fallbacks import (
     ListAnthropicFallbacksResponse,
     UpdateAnthropicFallbackRequest,
 )
-from .me import MeUsageResponse, PoolAccountStatus, PoolStatus, PoolWindow
+from .me import MeUsageResponse, PoolStatus, PoolWindow
 from .notifications import (
     NotificationRule,
     NotificationSettingsResponse,
@@ -106,7 +106,6 @@ __all__ = [
     "UpdateAccountRequest",
     "MeUsageResponse",
     "PoolWindow",
-    "PoolAccountStatus",
     "PoolStatus",
     "User",
     "BulkUserPriorityRequest",
