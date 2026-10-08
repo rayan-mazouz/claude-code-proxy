@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from app import config
 from app.logger import configure_logging, get_logger
-from app.utils import egress, notifications, oauth, provider_health, rotation, spare_capacity, warmup
+from app.utils import egress, notifications, oauth, provider_health, quota_attribution, rotation, spare_capacity, warmup
 from app.utils.models.api import ProviderHealth as ProviderHealthEnum
 from app.utils.postgres import AccountDb, get_db_cm
 
@@ -36,6 +36,7 @@ def refresh_once() -> None:
                     oauth.fetch_usage(access_token, egress_target=target),
                 )
                 spare_capacity.observe(db, account)
+                quota_attribution.observe(db, account)
                 provider_health.mark_success(account)
                 try:
                     profile = oauth.fetch_profile(access_token, egress_target=target)

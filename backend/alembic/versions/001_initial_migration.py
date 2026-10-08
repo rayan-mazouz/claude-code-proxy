@@ -77,6 +77,7 @@ def upgrade() -> None:
         sa.Column("warmup_last_status", sa.VARCHAR(length=32), nullable=True),
         sa.Column("warmup_last_error", sa.Text(), nullable=True),
         sa.Column("spare_capacity_tracking_json", sa.Text(), nullable=False, server_default="{}"),
+        sa.Column("quota_attribution_json", sa.Text(), nullable=False, server_default="{}"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id", name="pk_accounts_id"),

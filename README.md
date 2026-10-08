@@ -93,6 +93,11 @@ are the bottleneck now (pun intended).
   current 5-hour and weekly windows, and get HTTP 429 otherwise. Everyone
   else's usage is measured from the accounts' real usage, so it includes use
   outside the proxy (e.g. claude.ai on the same account).
+- The **Users** page shows usage as cost or as each user's share of the
+  accounts' current 5-hour, weekly and monthly windows (summed across accounts,
+  so 100% is one account's full limit). Each quota probe splits a window's
+  growth by the proxy cost each user caused on that account in the interval;
+  growth with no proxy traffic is use outside the proxy and is not counted.
 - Hashed API keys and Fernet-encrypted OAuth/fallback credentials.
 
 ### Team access

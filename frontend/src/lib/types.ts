@@ -391,6 +391,16 @@ export interface User {
     monthly_reset_at: string;
     total_spend_usd: number;
     monthly_spend_usd: number;
+    // Share of each provider quota window, summed across accounts (1 = one account's full window).
+    // Null when no account currently has that window open.
+    quota_usage: Record<QuotaWindowKey, QuotaShare | null>;
+}
+
+export type QuotaWindowKey = "five_hour" | "weekly" | "monthly";
+
+export interface QuotaShare {
+    used_pct: number;
+    reset_at: string | null;
 }
 
 export interface ApiKey {

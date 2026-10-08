@@ -95,6 +95,8 @@ class AccountDb(DatabaseBase):
     # Per quota window: usage last observed by the quota refresher and how much of it other (non-spare-capacity)
     # users caused. Maintained by utils/spare_capacity.observe.
     spare_capacity_tracking_json = Column(Text, nullable=False, default="{}", server_default="{}")
+    # Per quota window: each user's share of it, credited from usage growth. Maintained by utils/quota_attribution.observe.
+    quota_attribution_json = Column(Text, nullable=False, default="{}", server_default="{}")
     created_at = Column(DateTime(timezone=True), nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=False)
 

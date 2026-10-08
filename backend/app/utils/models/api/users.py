@@ -61,6 +61,21 @@ def _normalize_model_overrides(values):
     return normalized
 
 
+class QuotaShare(BaseModel):
+    """A user's share of one provider quota window, summed across accounts (1.0 = one account's full window)."""
+
+    used_pct: float
+    reset_at: Optional[datetime]  # earliest reset among the windows the user has used
+
+
+class QuotaUsage(BaseModel):
+    """Null for a window kind no account currently has open."""
+
+    five_hour: Optional[QuotaShare]
+    weekly: Optional[QuotaShare]
+    monthly: Optional[QuotaShare]
+
+
 class User(BaseModel):
     """A proxy user. Identity only -- the actual credentials live on its API keys."""
 
@@ -95,6 +110,7 @@ class User(BaseModel):
     monthly_reset_at: datetime
     total_spend_usd: float
     monthly_spend_usd: float
+    quota_usage: QuotaUsage
 
     @classmethod
     def from_db(
@@ -107,6 +123,7 @@ class User(BaseModel):
         total_spend_usd: float,
         monthly_spend_usd: float,
         monthly_reset_at: datetime,
+        quota_usage: dict,
     ) -> User:
         return cls(
             id=user_db.id,
@@ -140,6 +157,12 @@ class User(BaseModel):
             monthly_reset_at=monthly_reset_at,
             total_spend_usd=round(total_spend_usd, 6),
             monthly_spend_usd=round(monthly_spend_usd, 6),
+            quota_usage=QuotaUsage(
+                **{
+                    key: QuotaShare(used_pct=round(share.used_pct, 6), reset_at=share.reset_at) if share else None
+                    for key, share in quota_usage.items()
+                }
+            ),
         )
 
 

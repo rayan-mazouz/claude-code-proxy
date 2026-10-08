@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.logger import get_logger
 from app.model_catalog import configured_model_ids
-from app.utils import presets, request_policy, security, usage
+from app.utils import presets, quota_attribution, request_policy, security, usage
 from app.utils.models.api import (
     ApiKey,
     ApiKeyCreatedResponse,
@@ -67,6 +67,7 @@ def _build_user(db: Session, user: UserDb) -> User:
         usage.spend_usage(db, user_id=user.id),
         usage.spend_usage(db, user_id=user.id, month_to_date=True),
         usage.month_reset_at(),
+        quota_attribution.user_shares(db, [user.id])[str(user.id)],
     )
 
 
@@ -92,6 +93,7 @@ def _build_users(db: Session, users: list[UserDb]) -> list[User]:
     usage_by_user = {user_id: (int(tokens), int(requests), int(monthly_tokens)) for user_id, tokens, requests, monthly_tokens in usage_rows}
     spend_by_user = usage.spend_usage_rollups(db, UsageRecordDb.user_id, user_ids)
     reset_at = usage.month_reset_at()
+    quota_by_user = quota_attribution.user_shares(db, user_ids)
     result = []
     for user in users:
         tokens, requests, monthly_tokens = usage_by_user.get(user.id, (0, 0, 0))
@@ -106,6 +108,7 @@ def _build_users(db: Session, users: list[UserDb]) -> list[User]:
                 total_spend,
                 monthly_spend,
                 reset_at,
+                quota_by_user[str(user.id)],
             )
         )
     return result

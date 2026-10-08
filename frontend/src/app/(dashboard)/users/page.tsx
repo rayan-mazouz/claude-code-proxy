@@ -3,13 +3,22 @@
 // ---------------------------------------------------------------------------
 // Users page: each user owns one or more API keys. Create/edit/delete users,
 // set per-user rate limits and token budgets, manage their keys (one-time
-// secret reveal with shell + settings.json setup), and see month-to-date usage.
+// secret reveal with shell + settings.json setup), and see usage as cost or as a
+// share of the accounts' 5-hour, weekly and monthly quota windows.
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useState } from "react";
 import { Check, ChevronRight, KeyRound, ListChecks, Pencil, Search, Trash2 } from "lucide-react";
 import { api, API_BASE_URL, ApiError } from "@/lib/api";
-import { ApiKey, THINKING_LEVELS, ThinkingLevel, ThinkingMode, User, Preset } from "@/lib/types";
+import {
+    ApiKey,
+    QuotaWindowKey,
+    THINKING_LEVELS,
+    ThinkingLevel,
+    ThinkingMode,
+    User,
+    Preset,
+} from "@/lib/types";
 import {
     ModelAccessEditor,
     ModelRewritesEditor,
@@ -17,7 +26,13 @@ import {
     PresetsPanel,
     ThinkingModesEditor,
 } from "@/components/presets-panel";
-import { formatDateTime, formatNumber, formatTokens, formatUsd } from "@/lib/format";
+import {
+    formatCountdown,
+    formatDateTime,
+    formatNumber,
+    formatTokens,
+    formatUsd,
+} from "@/lib/format";
 import {
     Badge,
     Button,
@@ -30,6 +45,7 @@ import {
     Field,
     LoadingState,
     Modal,
+    Segmented,
     SelectMenu,
     Spinner,
     StatusToggle,
@@ -177,6 +193,67 @@ function MonthlyUsage({ user }: { user: User }) {
             </div>
             <div className="text-fog-400 mt-2 text-xs">
                 Resets {formatDateTime(user.monthly_reset_at)}
+            </div>
+        </div>
+    );
+}
+
+type UsageView = "cost" | "quota";
+
+const USAGE_VIEW_KEY = "users.usageView";
+
+const USAGE_VIEW_OPTIONS: { value: UsageView; label: string }[] = [
+    { value: "cost", label: "Cost" },
+    { value: "quota", label: "Limits %" },
+];
+
+const QUOTA_WINDOWS: { key: QuotaWindowKey; label: string; limit: string }[] = [
+    { key: "five_hour", label: "5-hour window", limit: "5-hour limit" },
+    { key: "weekly", label: "Weekly", limit: "weekly limit" },
+    { key: "monthly", label: "Monthly", limit: "monthly limit" },
+];
+
+// The user's share of the accounts' current provider windows, in percent of one account's limit.
+function QuotaUsage({ user }: { user: User }) {
+    return (
+        <div className="border-ink-700 bg-ink-900/45 mt-4 rounded-lg border p-4">
+            <div className="grid gap-4 sm:grid-cols-3">
+                {QUOTA_WINDOWS.map(({ key, label, limit }, index) => {
+                    const share = user.quota_usage[key];
+                    const fraction = share ? Math.min(share.used_pct, 1) : 0;
+                    return (
+                        <div
+                            key={key}
+                            className={index > 0 ? "border-ink-700 sm:border-l sm:pl-4" : ""}
+                        >
+                            <div className="flex items-baseline justify-between gap-2">
+                                <div className="text-fog-200 text-sm font-medium">{label}</div>
+                                <div className="text-fog-100 font-mono text-sm font-semibold tabular-nums">
+                                    {share ? `${(share.used_pct * 100).toFixed(1)}%` : "—"}
+                                </div>
+                            </div>
+                            <div className="text-fog-400 mt-0.5 text-xs">
+                                {share
+                                    ? share.reset_at
+                                        ? `of one account's ${limit} · ${formatCountdown(share.reset_at)}`
+                                        : `of one account's ${limit}`
+                                    : `No account has a ${limit} open`}
+                            </div>
+                            {share ? (
+                                <div className="bg-ink-700 mt-3 h-2 overflow-hidden rounded-full">
+                                    <div
+                                        className={`h-full rounded-full transition-all ${fraction >= 0.9 ? "bg-bad-500" : fraction >= 0.7 ? "bg-warn-500" : "bg-brand-500"}`}
+                                        style={{ width: `${fraction * 100}%` }}
+                                    />
+                                </div>
+                            ) : null}
+                        </div>
+                    );
+                })}
+            </div>
+            <div className="text-fog-400 mt-2 text-xs">
+                Measured from each account&apos;s quota and split by this user&apos;s share of the
+                proxy traffic. Summed across accounts.
             </div>
         </div>
     );
@@ -394,6 +471,7 @@ export default function UsersPage() {
     const [selectionMode, setSelectionMode] = useState(false);
     const [bulkPriority, setBulkPriority] = useState("1");
     const [applyingBulkPriority, setApplyingBulkPriority] = useState(false);
+    const [usageView, setUsageView] = useState<UsageView>("cost");
 
     const [showCreate, setShowCreate] = useState(false);
     const [editTarget, setEditTarget] = useState<User | null>(null);
@@ -432,6 +510,23 @@ export default function UsersPage() {
     useEffect(() => {
         void load();
     }, [load]);
+
+    useEffect(() => {
+        try {
+            if (window.localStorage.getItem(USAGE_VIEW_KEY) === "quota") setUsageView("quota");
+        } catch {
+            // localStorage may be unavailable — fall back to the cost view.
+        }
+    }, []);
+
+    const changeUsageView = (next: UsageView) => {
+        setUsageView(next);
+        try {
+            window.localStorage.setItem(USAGE_VIEW_KEY, next);
+        } catch {
+            /* ignore */
+        }
+    };
 
     const normalizedUserSearch = userSearch.trim().toLocaleLowerCase();
     const visibleUsers =
@@ -570,6 +665,12 @@ export default function UsersPage() {
                         />
                     </div>
                     <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+                        <Segmented
+                            options={USAGE_VIEW_OPTIONS}
+                            value={usageView}
+                            onChange={changeUsageView}
+                            label="Show usage as"
+                        />
                         <Button variant="ghost" onClick={() => void load(true)}>
                             Refresh
                         </Button>
@@ -788,24 +889,37 @@ export default function UsersPage() {
                                                                             </div>
                                                                         ) : null}
                                                                     </div>
-                                                                    <div className="bg-ink-900 flex-1 px-4 py-3">
-                                                                        <div className="text-fog-100 font-mono text-base font-semibold tracking-tight tabular-nums">
-                                                                            {formatUsd(
-                                                                                user.total_spend_usd,
-                                                                            )}
-                                                                        </div>
-                                                                        <div className="text-fog-400 mt-0.5 text-[11px] tracking-wider uppercase">
-                                                                            All-time spend
-                                                                        </div>
-                                                                        {user.lifetime_spend_budget_usd ? (
-                                                                            <div className="text-fog-500 mt-1 text-[10px]">
-                                                                                Limit{" "}
-                                                                                {formatUsd(
-                                                                                    user.lifetime_spend_budget_usd,
+                                                                    {usageView === "quota" ? (
+                                                                        <div className="bg-ink-900 flex-1 px-4 py-3">
+                                                                            <div className="text-fog-100 font-mono text-base font-semibold tracking-tight tabular-nums">
+                                                                                {formatTokens(
+                                                                                    user.monthly_tokens_used,
                                                                                 )}
                                                                             </div>
-                                                                        ) : null}
-                                                                    </div>
+                                                                            <div className="text-fog-400 mt-0.5 text-[11px] tracking-wider uppercase">
+                                                                                Tokens this month
+                                                                            </div>
+                                                                        </div>
+                                                                    ) : (
+                                                                        <div className="bg-ink-900 flex-1 px-4 py-3">
+                                                                            <div className="text-fog-100 font-mono text-base font-semibold tracking-tight tabular-nums">
+                                                                                {formatUsd(
+                                                                                    user.total_spend_usd,
+                                                                                )}
+                                                                            </div>
+                                                                            <div className="text-fog-400 mt-0.5 text-[11px] tracking-wider uppercase">
+                                                                                All-time spend
+                                                                            </div>
+                                                                            {user.lifetime_spend_budget_usd ? (
+                                                                                <div className="text-fog-500 mt-1 text-[10px]">
+                                                                                    Limit{" "}
+                                                                                    {formatUsd(
+                                                                                        user.lifetime_spend_budget_usd,
+                                                                                    )}
+                                                                                </div>
+                                                                            ) : null}
+                                                                        </div>
+                                                                    )}
                                                                     <div className="bg-ink-900 flex-1 px-4 py-3">
                                                                         <div className="text-fog-100 font-mono text-base font-semibold tracking-tight tabular-nums">
                                                                             {formatNumber(
@@ -828,7 +942,11 @@ export default function UsersPage() {
                                                                     </div>
                                                                 </div>
 
-                                                                <MonthlyUsage user={user} />
+                                                                {usageView === "quota" ? (
+                                                                    <QuotaUsage user={user} />
+                                                                ) : (
+                                                                    <MonthlyUsage user={user} />
+                                                                )}
 
                                                                 {/* Keys toggle + actions */}
                                                                 <div className="border-ink-700 mt-4 flex flex-wrap items-center justify-between gap-2 border-t pt-3.5">
