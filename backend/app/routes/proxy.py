@@ -624,6 +624,19 @@ async def _send_with_account_limit(connection, method, url, headers, content, ac
     return candidate
 
 
+@router.get("/models")
+def list_models(
+    key: ApiKeyDb = Depends(security.authenticate_user),  # noqa: B008
+    db: Session = Depends(get_db),  # noqa: B008
+) -> dict:
+    """Anthropic-style model list: the configured models this key's user may request."""
+    user = db.query(UserDb).filter(UserDb.id == key.user_id).first()
+    allowed = json.loads(user.allowed_models_json) if user is not None and user.allowed_models_json else None
+    ids = [model for model in configured_model_ids() if allowed is None or model.lower() in allowed]
+    data = [{"type": "model", "id": model, "display_name": model, "created_at": "1970-01-01T00:00:00Z"} for model in ids]
+    return {"data": data, "has_more": False, "first_id": ids[0] if ids else None, "last_id": ids[-1] if ids else None}
+
+
 @router.post("/messages")
 @router.post("/messages/count_tokens")
 async def proxy_messages(

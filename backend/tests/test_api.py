@@ -1375,3 +1375,12 @@ def test_stats_range_filter(client, admin_headers, seed_account, make_user):
     # An explicit end without a start means all time and includes the earliest request.
     all_time = get("/api/v1/stats/activity", end=future)
     assert sum(point["requests"] for point in all_time["points"]) == 1
+
+
+def test_models_lists_what_the_key_may_use(client, admin_headers, make_user):
+    key = make_user("model-lister")
+    listed = client.get("/api/v1/models", headers={"Authorization": f"Bearer {key}"})
+    assert listed.status_code == 200, listed.text
+    ids = [model["id"] for model in listed.json()["data"]]
+    assert ids and all(model["type"] == "model" for model in listed.json()["data"])
+    assert client.get("/api/v1/models").status_code == 401
