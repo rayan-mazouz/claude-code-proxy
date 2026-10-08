@@ -323,6 +323,41 @@ def test_proxy_streaming_relays_and_records(client, admin_headers, seed_account,
 
 
 @respx.mock
+def test_proxy_forwards_only_api_headers_upstream(client, seed_account, make_user):
+    seed_account("header-account")
+    key = make_user("header-user")
+
+    respx.route(host="testserver").pass_through()
+    route = respx.post(ANTHROPIC_MESSAGES).mock(
+        return_value=httpx.Response(200, json={"model": "claude-haiku-4-5", "usage": {"input_tokens": 1, "output_tokens": 1}})
+    )
+    client.post(
+        "/api/v1/messages",
+        headers={
+            "Authorization": f"Bearer {key}",
+            "X-Forwarded-For": "100.64.0.7",
+            "X-Real-Ip": "100.64.0.7",
+            "X-Forwarded-Host": "proxy.internal",
+            "Cookie": "session=secret",
+            "X-Debug-Client": "1",
+            "anthropic-unlisted": "1",
+            "anthropic-beta": "context-1m-2025-08-07",
+            "x-stainless-os": "Linux",
+            "x-app": "cli",
+        },
+        json={"model": "claude-haiku-4-5"},
+    )
+
+    sent = route.calls[0].request.headers
+    for leaked in ("x-forwarded-for", "x-real-ip", "x-forwarded-host", "cookie", "x-api-key", "x-debug-client", "anthropic-unlisted"):
+        assert leaked not in sent
+    assert sent["authorization"] == "Bearer upstream-access-token"
+    assert "context-1m-2025-08-07" in sent["anthropic-beta"]
+    assert sent["x-stainless-os"] == "Linux"
+    assert sent["x-app"] == "cli"
+
+
+@respx.mock
 def test_proxy_fails_over_on_429(client, admin_headers, seed_account, make_user):
     from app.utils.models.api import AccountStatus
     from app.utils.postgres import AccountDb

@@ -93,22 +93,34 @@ def _upstream_diagnostics(candidate: httpx.Response, *, stream_started: bool = F
     }
 
 
-# Request headers we must never forward upstream.
-_STRIP_REQUEST_HEADERS = {
-    "host",
-    "content-length",
-    "accept-encoding",  # force identity so we can parse the SSE stream
-    "authorization",  # replaced with the account's OAuth bearer
-    "x-api-key",  # OAuth uses bearer, not api-key
-    "connection",
-    "keep-alive",
-    "transfer-encoding",
-    "te",
-    "trailer",
-    "upgrade",
-    "proxy-authorization",
-    "proxy-authenticate",
-}
+# The request headers Claude Code itself sends on /v1/messages (captured from claude-cli 2.1.263), minus auth and
+# transport. Everything else is dropped: credentials are replaced per account, and gateway-added headers
+# (X-Forwarded-*, X-Real-Ip, cookies) would leak client addresses and this deployment's hostnames to the provider.
+_FORWARDED_REQUEST_HEADERS = frozenset(
+    {
+        "accept",
+        "content-type",
+        "user-agent",
+        "x-app",
+        "x-claude-code-session-id",
+        "anthropic-version",
+        "anthropic-beta",
+        "anthropic-dangerous-direct-browser-access",
+        "x-stainless-arch",
+        "x-stainless-lang",
+        "x-stainless-os",
+        "x-stainless-package-version",
+        "x-stainless-retry-count",
+        "x-stainless-runtime",
+        "x-stainless-runtime-version",
+        "x-stainless-timeout",
+    }
+)
+
+
+def _forwarded_request_headers(incoming) -> Dict[str, str]:
+    return {key: value for key, value in incoming.items() if key.lower() in _FORWARDED_REQUEST_HEADERS}
+
 
 # Response headers the ASGI server sets itself, so we must not pass them back verbatim.
 _STRIP_RESPONSE_HEADERS = {"content-length", "content-encoding", "transfer-encoding", "connection", "keep-alive"}
@@ -227,12 +239,8 @@ def _restore_requested_model_in_sse_frame(frame: bytes, requested_model: object)
 
 
 def _build_upstream_headers(incoming, access_token: str) -> Dict[str, str]:
-    """Clone the client's headers, strip auth/transport, inject the OAuth bearer and the required anthropic flags."""
-    headers: Dict[str, str] = {}
-    for key, value in incoming.items():
-        if key.lower() not in _STRIP_REQUEST_HEADERS:
-            headers[key] = value
-
+    """Forward the client's API headers, inject the OAuth bearer and the required anthropic flags."""
+    headers = _forwarded_request_headers(incoming)
     headers["Authorization"] = f"Bearer {access_token}"
 
     beta = headers.get("anthropic-beta")
@@ -248,10 +256,7 @@ def _build_upstream_headers(incoming, access_token: str) -> Dict[str, str]:
 
 def _build_fallback_headers(incoming, api_key: str) -> Dict[str, str]:
     """Build Anthropic API-key headers without subscription-only OAuth beta flags."""
-    headers: Dict[str, str] = {}
-    for key, value in incoming.items():
-        if key.lower() not in _STRIP_REQUEST_HEADERS:
-            headers[key] = value
+    headers = _forwarded_request_headers(incoming)
     headers["x-api-key"] = api_key
     headers.setdefault("anthropic-version", config.ANTHROPIC_VERSION)
     headers.setdefault("User-Agent", config.CLAUDE_CODE_USER_AGENT)
