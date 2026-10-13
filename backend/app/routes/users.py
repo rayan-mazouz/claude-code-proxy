@@ -204,7 +204,6 @@ def create_user(
         allowed_thinking_modes_json=json.dumps(request.allowed_thinking_modes, separators=(",", ":")),
         model_thinking_levels_json=json.dumps(request.model_thinking_levels, separators=(",", ":")),
         model_thinking_modes_json=json.dumps(request.model_thinking_modes, separators=(",", ":")),
-        allow_extended_context=request.allow_extended_context,
         created_at=datetime.now(timezone.utc),
     )
     if request.preset_id:
@@ -222,9 +221,6 @@ def create_user(
                 setattr(user, presets.POLICY_COLUMNS[field], getattr(selected_preset, presets.POLICY_COLUMNS[field]))
             else:
                 _track_policy_override(db, user, field)
-    if user.name.strip().lower() == "devasheesh":
-        user.allow_extended_context = True
-        user.preset_overrides_json = json.dumps(sorted(presets.overridden_fields(user) | {"allow_extended_context"})) if user.preset_id else "[]"
     db.add(user)
     db.commit()
 
@@ -278,9 +274,6 @@ def update_user(
 
     if request.name is not None:
         user.name = request.name
-        if user.name.strip().lower() == "devasheesh":
-            user.allow_extended_context = True
-            presets.set_overridden_fields(user, (presets.overridden_fields(user) | {"allow_extended_context"}) if user.preset_id else set())
     if request.active is not None:
         user.active = request.active
     if request.priority is not None:
@@ -322,13 +315,6 @@ def update_user(
     if "model_thinking_modes" in request.model_fields_set:
         user.model_thinking_modes_json = json.dumps(request.model_thinking_modes or {}, separators=(",", ":"))
         _track_policy_override(db, user, "model_thinking_modes")
-    if "allow_extended_context" in request.model_fields_set:
-        user.allow_extended_context = request.allow_extended_context
-        _track_policy_override(db, user, "allow_extended_context")
-
-    if user.name.strip().lower() == "devasheesh":
-        user.allow_extended_context = True
-        presets.set_overridden_fields(user, (presets.overridden_fields(user) | {"allow_extended_context"}) if user.preset_id else set())
 
     db.commit()
 
@@ -348,9 +334,6 @@ def assign_user_preset(
     if user is None or preset is None:
         raise HTTPException(status_code=404, detail="User or preset not found")
     presets.apply_preset(user, preset, preserve_overrides=request.preserve_overrides)
-    if user.name.strip().lower() == "devasheesh":
-        user.allow_extended_context = True
-        presets.set_overridden_fields(user, (presets.overridden_fields(user) | {"allow_extended_context"}) if user.preset_id else set())
     db.commit()
     return UserResponse(user=_build_user(db, user))
 
@@ -374,9 +357,6 @@ def clear_user_preset_override(
     overrides.discard(field)
     presets.set_overridden_fields(user, overrides)
     setattr(user, presets.POLICY_COLUMNS[field], getattr(preset, presets.POLICY_COLUMNS[field]))
-    if user.name.strip().lower() == "devasheesh":
-        user.allow_extended_context = True
-        presets.set_overridden_fields(user, (presets.overridden_fields(user) | {"allow_extended_context"}) if user.preset_id else set())
     db.commit()
     return UserResponse(user=_build_user(db, user))
 

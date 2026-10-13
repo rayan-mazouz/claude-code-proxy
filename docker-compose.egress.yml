@@ -5,6 +5,11 @@ name: claude-code-proxy-egress
 # compete for host ports or interrupt active outbound streams.
 services:
   relay:
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
     build: ./backend
     image: claude-code-proxy/backend:latest
     command: uv run python -m app.scripts.egress_relay

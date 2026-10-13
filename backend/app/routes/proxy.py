@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from math import ceil
 from typing import Dict, Mapping, Optional
 
+import anyio
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from fastapi.responses import Response, StreamingResponse
@@ -403,10 +404,12 @@ def _first_error_frame(raw: bytes, *, complete: bool) -> Optional[str]:
     return None
 
 
-async def _iter_sse_frames(response: httpx.Response):
+async def _iter_sse_frames(response: httpx.Response, usage_accumulator=None):
     """Re-chunk an SSE stream into whole frames so each can be rewritten independently."""
     buffer = bytearray()
     async for chunk in response.aiter_bytes():
+        if usage_accumulator is not None:
+            usage_accumulator.feed(chunk)
         buffer.extend(chunk)
         while True:
             match = _SSE_FRAME_SEPARATOR.search(buffer)
@@ -602,9 +605,10 @@ async def _send_with_account_limit(connection, method, url, headers, content, ac
     try:
         client = connection.client
         candidate = await _prepare_candidate(await client.send(client.build_request(method, url, headers=headers, content=content), stream=True))
-    except Exception:
+    except BaseException:
         lease.release()
-        await connection.aclose()
+        with anyio.CancelScope(shield=True):
+            await connection.aclose()
         if activity is not None:
             activity(spare_capacity.REQUEST_FINISHED)
         raise
@@ -1241,6 +1245,7 @@ async def proxy_messages(
         account_id=chosen_id,
         fallback_provider_id=chosen_fallback_id,
         status_code=resp.status_code,
+        metadata={"request_outcome": "failed" if resp.status_code >= 400 else ("pending" if "text/event-stream" in content_type else "succeeded")},
     )
     _set_archive_metadata(
         request,
@@ -1295,12 +1300,21 @@ async def proxy_messages(
 
     async def stream_body():
         try:
-            async for chunk in _iter_sse_frames(resp):
-                accumulator.feed(chunk)
+            async for chunk in _iter_sse_frames(resp, usage_accumulator=accumulator):
                 yield _restore_requested_model_in_sse_frame(chunk, requested_model)
         finally:
-            await resp.aclose()
             captured_usage = accumulator.result()
+            succeeded = accumulator.completed and not accumulator.failed
+            _emit_event(
+                request,
+                "response.completed" if succeeded else "response.failed",
+                user_id=user_id,
+                api_key_id=api_key_id,
+                account_id=chosen_id,
+                fallback_provider_id=chosen_fallback_id,
+                status_code=status_code,
+                metadata={"request_outcome": "succeeded" if succeeded else "failed"},
+            )
             _archive_usage(request, captured_usage)
             _record_usage_safe(
                 user_id,
@@ -1312,6 +1326,9 @@ async def proxy_messages(
                 chosen_fallback_id,
                 _request_duration_ms(request),
             )
+
+            with anyio.CancelScope(shield=True):
+                await resp.aclose()
 
     return StreamingResponse(
         stream_body(),

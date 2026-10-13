@@ -12,7 +12,7 @@ from fastapi import Query
 from pydantic import BaseModel, Field, field_validator
 
 from app.model_catalog import configured_model_ids
-from app.utils import request_policy
+from app.utils import presets, request_policy
 from app.utils.thinking import THINKING_LEVELS
 
 ThinkingLevel = Literal["low", "medium", "high", "max"]
@@ -99,7 +99,6 @@ class User(BaseModel):
     allowed_thinking_modes: List[ThinkingMode]
     model_thinking_levels: Dict[str, List[ThinkingLevel]]
     model_thinking_modes: Dict[str, List[ThinkingMode]]
-    allow_extended_context: bool
     preset_id: Optional[uuid.UUID]
     preset_overrides: List[str]
     last_used_at: Optional[datetime]
@@ -146,9 +145,8 @@ class User(BaseModel):
             allowed_thinking_modes=json.loads(user_db.allowed_thinking_modes_json),
             model_thinking_levels=json.loads(user_db.model_thinking_levels_json or "{}"),
             model_thinking_modes=json.loads(user_db.model_thinking_modes_json or "{}"),
-            allow_extended_context=bool(user_db.allow_extended_context),
             preset_id=user_db.preset_id,
-            preset_overrides=json.loads(user_db.preset_overrides_json or "[]"),
+            preset_overrides=sorted(presets.overridden_fields(user_db)),
             last_used_at=user_db.last_used_at,
             created_at=user_db.created_at,
             total_tokens=total_tokens,
@@ -241,7 +239,6 @@ class CreateUserRequest(BaseModel):
     allowed_thinking_modes: List[ThinkingMode] = Field(default_factory=lambda: ["disabled", "enabled", "adaptive"], min_length=1)
     model_thinking_levels: Dict[str, List[ThinkingLevel]] = Field(default_factory=dict)
     model_thinking_modes: Dict[str, List[ThinkingMode]] = Field(default_factory=dict)
-    allow_extended_context: bool = False
 
     @field_validator("model_overrides", mode="before")
     @classmethod
@@ -290,7 +287,6 @@ class UpdateUserRequest(BaseModel):
     allowed_thinking_modes: Optional[List[ThinkingMode]] = Field(default=None, min_length=1)
     model_thinking_levels: Optional[Dict[str, List[ThinkingLevel]]] = None
     model_thinking_modes: Optional[Dict[str, List[ThinkingMode]]] = None
-    allow_extended_context: Optional[bool] = None
 
     @field_validator("model_overrides", mode="before")
     @classmethod

@@ -216,6 +216,7 @@ export const api = {
         end?: string,
         requestId?: string,
         model?: string,
+        groupBy?: "request",
     ) {
         const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
         if (eventType) params.set("event_type", eventType);
@@ -224,6 +225,7 @@ export const api = {
         if (end) params.set("end", end);
         if (requestId) params.set("request_id", requestId);
         if (model) params.set("model", model);
+        if (groupBy) params.set("group_by", groupBy);
         return request<ProxyEventPage>(`/v1/events?${params.toString()}`);
     },
 
@@ -524,7 +526,6 @@ export const api = {
             allowed_thinking_modes?: ThinkingMode[];
             model_thinking_levels?: Record<string, ThinkingLevel[]>;
             model_thinking_modes?: Record<string, ThinkingMode[]>;
-            allow_extended_context?: boolean;
         } = {},
     ): Promise<User> {
         const res = await request<{ user: User }>("/v1/users", {
@@ -548,7 +549,6 @@ export const api = {
                 allowed_thinking_modes: opts.allowed_thinking_modes,
                 model_thinking_levels: opts.model_thinking_levels,
                 model_thinking_modes: opts.model_thinking_modes,
-                allow_extended_context: opts.allow_extended_context,
             },
         });
         return res.user;
@@ -576,7 +576,6 @@ export const api = {
             allowed_thinking_modes?: ThinkingMode[];
             model_thinking_levels?: Record<string, ThinkingLevel[]>;
             model_thinking_modes?: Record<string, ThinkingMode[]>;
-            allow_extended_context?: boolean;
         },
     ): Promise<User> {
         const res = await request<{ user: User }>(`/v1/users/${id}`, {

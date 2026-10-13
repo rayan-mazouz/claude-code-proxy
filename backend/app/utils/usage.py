@@ -21,6 +21,7 @@ class Usage:
     model: Optional[str] = None
     input_tokens: int = 0
     output_tokens: int = 0
+    usage_reported: bool = False
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
     # Breakdown of cache_creation_input_tokens by the TTL Anthropic applied (5-minute vs 1-hour cache).
@@ -61,6 +62,8 @@ class StreamUsageAccumulator:
     def __init__(self, reasoning_level: Optional[str] = None) -> None:
         self._buffer = ""
         self.usage = Usage(reasoning_level=reasoning_level)
+        self.completed = False
+        self.failed = False
 
     def feed(self, chunk: bytes) -> None:
         self._buffer += chunk.decode("utf-8", errors="ignore")
@@ -82,6 +85,8 @@ class StreamUsageAccumulator:
             return
 
         event_type = obj.get("type")
+        self.completed |= event_type == "message_stop"
+        self.failed |= event_type == "error"
         if event_type == "message_start":
             message = obj.get("message", {})
             self.usage.model = message.get("model") or self.usage.model
@@ -92,6 +97,10 @@ class StreamUsageAccumulator:
     def _absorb_usage(self, u: Mapping, is_start: bool) -> None:
         if not isinstance(u, Mapping):
             return
+
+        self.usage.usage_reported |= any(
+            key in u for key in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+        )
 
         if is_start:
             self.usage.input_tokens = u.get("input_tokens", self.usage.input_tokens) or 0
@@ -104,6 +113,9 @@ class StreamUsageAccumulator:
             self.usage.output_tokens = u["output_tokens"]
 
     def result(self) -> Usage:
+        if self._buffer:
+            line, self._buffer = self._buffer, ""
+            self._consume_line(line.strip())
         return self.usage
 
 
@@ -117,6 +129,9 @@ def usage_from_json(body: Mapping, reasoning_level: Optional[str] = None) -> Usa
         ttl_5m, ttl_1h = _cache_ttl_buckets(usage_block)
         return Usage(
             model=body.get("model"),
+            usage_reported=any(
+                key in usage_block for key in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+            ),
             input_tokens=usage_block.get("input_tokens", 0) or 0,
             output_tokens=usage_block.get("output_tokens", 0) or 0,
             cache_creation_input_tokens=usage_block.get("cache_creation_input_tokens", 0) or 0,
@@ -128,6 +143,7 @@ def usage_from_json(body: Mapping, reasoning_level: Optional[str] = None) -> Usa
 
     return Usage(
         model=body.get("model"),
+        usage_reported="input_tokens" in body or "output_tokens" in body,
         input_tokens=int(body.get("input_tokens") or 0),
         output_tokens=int(body.get("output_tokens") or 0),
         reasoning_level=reasoning_level,
@@ -175,6 +191,8 @@ def record_usage(
             cache_creation_input_tokens=usage.cache_creation_input_tokens,
         ),
         duration_ms=duration_ms,
+        usage_reported=usage.usage_reported
+        or bool(usage.input_tokens or usage.output_tokens or usage.cache_read_input_tokens or usage.cache_creation_input_tokens),
         tokens_per_second=(usage.output_tokens / (duration_ms / 1000.0) if duration_ms and duration_ms > 0 and usage.output_tokens > 0 else None),
         created_at=now,
     )

@@ -129,8 +129,6 @@ def sync_canonical_schema() -> None:
         for column_name, column_type in user_additions.items():
             if column_name not in user_columns:
                 connection.execute(text(f"ALTER TABLE users ADD COLUMN {column_name} {column_type}"))
-        if "allow_extended_context" not in user_columns:
-            connection.execute(text("ALTER TABLE users ADD COLUMN allow_extended_context BOOLEAN NOT NULL DEFAULT FALSE"))
         preset_columns = {
             "allowed_models_json": "TEXT",
             "preset_id": "UUID",
@@ -147,8 +145,6 @@ def sync_canonical_schema() -> None:
         needs_fallback_policy_backfill = "fallback_enabled" not in preset_columns_existing
         if needs_fallback_policy_backfill:
             connection.execute(text("ALTER TABLE presets ADD COLUMN fallback_enabled BOOLEAN NOT NULL DEFAULT FALSE"))
-        if "allow_extended_context" not in preset_columns_existing:
-            connection.execute(text("ALTER TABLE presets ADD COLUMN allow_extended_context BOOLEAN NOT NULL DEFAULT FALSE"))
         preset_fields = (
             "fallback_enabled",
             "allowed_models_json",
@@ -157,7 +153,6 @@ def sync_canonical_schema() -> None:
             "model_thinking_levels_json",
             "allowed_thinking_modes_json",
             "model_thinking_modes_json",
-            "allow_extended_context",
         )
         existing_preset = connection.execute(text("SELECT id FROM presets ORDER BY created_at LIMIT 1")).scalar()
         if existing_preset is None:
@@ -170,7 +165,6 @@ def sync_canonical_schema() -> None:
                 "model_thinking_levels_json": "{}",
                 "allowed_thinking_modes_json": '["disabled","enabled","adaptive"]',
                 "model_thinking_modes_json": "{}",
-                "allow_extended_context": False,
             }
             baseline = {}
             for field, default in defaults.items():
@@ -222,21 +216,16 @@ def sync_canonical_schema() -> None:
                     {"overrides": json.dumps(sorted(overrides)), "id": row["id"]},
                 )
 
-        connection.execute(text("UPDATE users SET allow_extended_context = TRUE WHERE lower(trim(name)) = 'devasheesh'"))
-
-        # Repair the protected user's existing override marker without
-        # changing other policy choices. Repeat migrations are idempotent.
-        for row in (
-            connection.execute(text("SELECT id, preset_overrides_json FROM users WHERE lower(trim(name)) = 'devasheesh' AND preset_id IS NOT NULL"))
-            .mappings()
-            .all()
-        ):
-            overrides = set(json.loads(row["preset_overrides_json"] or "[]"))
-            overrides.add("allow_extended_context")
-            connection.execute(
-                text("UPDATE users SET preset_overrides_json = :overrides WHERE id = :id"),
-                {"overrides": json.dumps(sorted(overrides)), "id": row["id"]},
-            )
+        # This Codex-only policy has no meaning on Claude. Retain its old
+        # database columns for blue-green compatibility, but remove stale
+        # markers without changing any remaining user policy values.
+        for row in connection.execute(text("SELECT id, preset_overrides_json FROM users")).mappings().all():
+            overrides = json.loads(row["preset_overrides_json"] or "[]")
+            if isinstance(overrides, list) and "allow_extended_context" in overrides:
+                connection.execute(
+                    text("UPDATE users SET preset_overrides_json = :overrides WHERE id = :id"),
+                    {"overrides": json.dumps([field for field in overrides if field != "allow_extended_context"]), "id": row["id"]},
+                )
 
         # Reconcile fallback routing additions without inventing a second
         # migration history.
@@ -252,6 +241,8 @@ def sync_canonical_schema() -> None:
         )
         inspector = inspect(connection)
         usage_columns = {column["name"] for column in inspector.get_columns("usage_records")}
+        if "usage_reported" not in usage_columns:
+            connection.execute(text("ALTER TABLE usage_records ADD COLUMN usage_reported BOOLEAN"))
         if "fallback_provider_id" not in usage_columns:
             connection.execute(
                 text("ALTER TABLE usage_records ADD COLUMN fallback_provider_id UUID REFERENCES anthropic_fallbacks(id) ON DELETE SET NULL")

@@ -277,9 +277,6 @@ function PresetModal({
     const [modelModes, setModelModes] = useState<Record<string, ThinkingMode[]>>(
         preset?.model_thinking_modes ?? {},
     );
-    const [allowExtendedContext, setAllowExtendedContext] = useState(
-        preset?.allow_extended_context ?? false,
-    );
     const [useGlobalThinking, setUseGlobalThinking] = useState(
         !preset || Object.keys(preset.model_thinking_levels).length === 0,
     );
@@ -310,7 +307,6 @@ function PresetModal({
                           ]),
                       ),
                 model_thinking_modes: modelModes,
-                allow_extended_context: allowExtendedContext,
             };
             if (preset) await api.updatePreset(preset.id, payload);
             else await api.createPreset(payload);
@@ -336,21 +332,6 @@ function PresetModal({
                         className="accent-brand-500 h-4 w-4 shrink-0"
                     />
                     Allow API fallback providers
-                </label>
-                <label className="border-ink-700 bg-ink-900/50 text-fog-200 flex items-start gap-2.5 rounded-md border px-3 py-2.5 text-sm">
-                    <input
-                        type="checkbox"
-                        checked={allowExtendedContext}
-                        onChange={(event) => setAllowExtendedContext(event.target.checked)}
-                        className="accent-brand-500 mt-0.5 h-4 w-4 shrink-0"
-                    />
-                    <span>
-                        <span className="block">Allow extended context window</span>
-                        <span className="text-fog-400 mt-0.5 block text-xs">
-                            Enable the provider&apos;s extended context mode for users assigned this
-                            preset.
-                        </span>
-                    </span>
                 </label>
                 <Field label="Preset name">
                     <TextInput

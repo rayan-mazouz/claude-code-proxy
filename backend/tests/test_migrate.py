@@ -14,7 +14,6 @@ def test_sync_canonical_schema_adds_rotation_threshold_and_fallback_columns():
         "monthly_spend_budget_usd",
         "lifetime_spend_budget_usd",
         "model_overrides_json",
-        "allow_extended_context",
     }
     with engine.begin() as connection:
         for column_name in threshold_columns:

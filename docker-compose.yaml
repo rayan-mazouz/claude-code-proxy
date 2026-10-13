@@ -12,6 +12,11 @@ name: claude-code-proxy
 
 services:
   backend-init-db:
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
     build: ./backend
     image: claude-code-proxy/backend:latest
     command: uv run python -m app.scripts.migrate
@@ -20,6 +25,11 @@ services:
     # database this one-shot just runs the migration against POSTGRES_HOST.
 
   backend:
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
     build: ./backend
     image: claude-code-proxy/backend:latest
     command: uv run gunicorn app.main:app --workers 4 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:80 --log-level info
@@ -39,6 +49,11 @@ services:
       retries: 3
 
   quota-refresher:
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
     build: ./backend
     image: claude-code-proxy/backend:latest
     command: uv run python -m app.scripts.quota_refresher
@@ -51,6 +66,11 @@ services:
         condition: service_completed_successfully
 
   notification-dispatcher:
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
     build: ./backend
     image: claude-code-proxy/backend:latest
     command: uv run python -m app.scripts.notification_dispatcher
@@ -63,6 +83,11 @@ services:
         condition: service_completed_successfully
 
   archive-retention:
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
     build: ./backend
     image: claude-code-proxy/backend:latest
     command: uv run python -m app.scripts.archive_retention
@@ -80,6 +105,11 @@ services:
         condition: service_completed_successfully
 
   frontend:
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
     build: ./frontend
     image: claude-code-proxy/frontend:latest
     restart: unless-stopped

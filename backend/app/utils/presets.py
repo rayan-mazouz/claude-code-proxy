@@ -10,7 +10,6 @@ POLICY_COLUMNS = {
     "model_overrides": "model_overrides_json",
     "model_thinking_levels": "model_thinking_levels_json",
     "model_thinking_modes": "model_thinking_modes_json",
-    "allow_extended_context": "allow_extended_context",
 }
 
 

@@ -1,14 +1,16 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { ProxyEvent, TimeRange, UserLookup } from "@/lib/types";
 import { RangePicker } from "@/components/RangePicker";
 import { UserFilter } from "@/components/UserFilter";
 import { EventTypeFilter } from "@/components/EventTypeFilter";
-import { Button, Pagination, StatusToggle, TextInput } from "@/components/ui";
-import { formatCompactNumber, formatDateTime } from "@/lib/format";
 import { RequestCaptureOverlay } from "@/components/RequestCaptureOverlay";
+import { Button, Pagination, SelectMenu, StatusToggle, TextInput } from "@/components/ui";
+import { formatCompactNumber, formatDateTime } from "@/lib/format";
+
 const EVENT_TYPES = [
     "request.received",
     "request.exhausted",
@@ -28,7 +30,12 @@ const EVENT_TYPES = [
     "fallback.response_received",
     "fallback.transient_error",
     "response.returned",
+    "response.completed",
+    "response.failed",
+    "response.interrupted",
 ];
+const GROUP_BY_OPTIONS = ["events"] as const;
+type GroupBy = "request" | (typeof GROUP_BY_OPTIONS)[number];
 const initialRange = (): TimeRange => {
     const now = new Date();
     return {
@@ -42,13 +49,50 @@ const DEFAULT_PAGE_SIZE = 25;
 const AUTO_REFRESH_KEY = "dashboard_auto_refresh";
 const REFRESH_SECS_KEY = "dashboard_refresh_secs";
 const rowTone = (type: string) =>
-    type.includes("exhausted") || type.includes("error") || type.includes("capacity")
+    type.includes("exhausted") ||
+    type.includes("error") ||
+    type.includes("capacity") ||
+    type.includes("failed") ||
+    type.includes("interrupted")
         ? "bg-bad-500/10 hover:bg-bad-500/15"
         : type.includes("cooldown") || type.includes("rate_limited") || type.includes("throttled")
           ? "bg-warn-500/10 hover:bg-warn-500/15"
-          : type.includes("response_received") || type.includes("returned")
+          : type.includes("response_received") ||
+              type.includes("returned") ||
+              type === "response.completed"
             ? "bg-good-500/10 hover:bg-good-500/15"
             : "hover:bg-brand-500/5";
+
+function displayUser(event: ProxyEvent, users: UserLookup[]): string {
+    const name = event.metadata.user_name;
+    if (typeof name === "string" && name) {
+        return event.metadata.user_deleted && name !== "Deleted user" ? `${name} (deleted)` : name;
+    }
+    return (
+        users.find((user) => user.id === event.user_id)?.name ??
+        (event.user_id ? "User unavailable" : "Unattributed")
+    );
+}
+
+function requestTone(events: ProxyEvent[]): string {
+    const outcome = events.find((event) => typeof event.metadata.request_outcome === "string")
+        ?.metadata.request_outcome;
+    if (outcome === "failed") return "bg-bad-500/10 hover:bg-bad-500/15";
+    if (outcome === "succeeded") return "bg-good-500/10 hover:bg-good-500/15";
+    const terminal = [...events]
+        .reverse()
+        .find((event) =>
+            ["response.returned", "request.exhausted", "request.rejected"].includes(
+                event.event_type,
+            ),
+        );
+    if (outcome !== "pending" && terminal?.status_code != null) {
+        return terminal.status_code >= 400
+            ? "bg-bad-500/10 hover:bg-bad-500/15"
+            : "bg-good-500/10 hover:bg-good-500/15";
+    }
+    return "hover:bg-brand-500/5";
+}
 
 function displayModel(metadata: Record<string, unknown>): string {
     const effective = String(metadata.model ?? "—");
@@ -64,6 +108,10 @@ function displayModel(metadata: Record<string, unknown>): string {
     return details.length > 0
         ? `${compact(effective)} (${details.join(", ")})`
         : compact(effective);
+}
+
+function groupValue(event: ProxyEvent, groupBy: GroupBy): string {
+    return groupBy === "request" ? event.request_id : event.id;
 }
 
 function CacheReadMetric({ cached, input }: { cached: unknown; input: unknown }) {
@@ -87,6 +135,7 @@ function CacheReadMetric({ cached, input }: { cached: unknown; input: unknown })
         </span>
     );
 }
+
 export default function EventsPage() {
     const router = useRouter();
     const pathname = usePathname();
@@ -103,10 +152,17 @@ export default function EventsPage() {
             ? pageSizeValue
             : DEFAULT_PAGE_SIZE;
         const page = Number.isInteger(pageValue) && pageValue > 0 ? pageValue : 1;
+        const rawGroupBy = params.get("groupBy");
+        const groupBy: GroupBy = GROUP_BY_OPTIONS.includes(
+            rawGroupBy as (typeof GROUP_BY_OPTIONS)[number],
+        )
+            ? (rawGroupBy as GroupBy)
+            : "request";
         const rangeLabel = params.get("range");
         return {
             pageSize,
             offset: (page - 1) * pageSize,
+            groupBy,
             eventType: params.get("event") ?? "",
             model: params.get("model") ?? "",
             userId: params.get("user") || null,
@@ -125,7 +181,9 @@ export default function EventsPage() {
     const [userId, setUserId] = useState<string | null>(null);
     const [eventType, setEventType] = useState("");
     const [model, setModel] = useState("");
+    const [groupBy, setGroupBy] = useState<GroupBy>("request");
     const [events, setEvents] = useState<ProxyEvent[]>([]);
+    const [expandedRequests, setExpandedRequests] = useState<Set<string>>(new Set());
     const [total, setTotal] = useState(0);
     const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
     const [offset, setOffset] = useState(0);
@@ -150,6 +208,7 @@ export default function EventsPage() {
                     range.end,
                     undefined,
                     selectedModel || undefined,
+                    groupBy === "request" ? "request" : undefined,
                 )
                 .then((page) => {
                     setEvents(page.events);
@@ -158,8 +217,16 @@ export default function EventsPage() {
                 .catch((e) => setError(e instanceof Error ? e.message : "Unable to load events."))
                 .finally(() => setLoading(false));
         },
-        [eventType, model, offset, pageSize, range.end, range.start, userId],
+        [eventType, groupBy, model, offset, pageSize, range.end, range.start, userId],
     );
+    const toggleRequest = (requestId: string) => {
+        setExpandedRequests((current) => {
+            const next = new Set(current);
+            if (next.has(requestId)) next.delete(requestId);
+            else next.add(requestId);
+            return next;
+        });
+    };
     const updateUrl = useCallback(
         (updates: Record<string, string | null | undefined>) => {
             const params = new URLSearchParams(queryString);
@@ -197,6 +264,7 @@ export default function EventsPage() {
         setUserId(query.userId);
         setEventType(query.eventType);
         setModel(query.model);
+        setGroupBy(query.groupBy);
         setPageSize(query.pageSize);
         setOffset(query.offset);
         setQueryHydrated(true);
@@ -241,7 +309,8 @@ export default function EventsPage() {
                         Proxy events
                     </h1>
                     <p className="text-fog-400 mt-0.5 text-sm">
-                        Trace every request, retry, cooldown, failover, and response.
+                        Trace request routing, retries, capacity failures, cooldowns, and completed
+                        responses.
                     </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-3">
@@ -330,6 +399,27 @@ export default function EventsPage() {
                     allLabel="All models"
                     idPrefix="event-model-options"
                 />
+                <div className="min-w-[220px]">
+                    <span className="text-fog-400 block text-xs">Group by</span>
+                    <SelectMenu
+                        value={groupBy}
+                        options={[
+                            { value: "request", label: "Individual requests" },
+                            { value: "events", label: "All events" },
+                        ]}
+                        onChange={(next) => {
+                            const nextGroupBy = next as GroupBy;
+                            setGroupBy(nextGroupBy);
+                            setOffset(0);
+                            updateUrl({
+                                groupBy: nextGroupBy === "request" ? null : nextGroupBy,
+                                page: "1",
+                            });
+                        }}
+                        ariaLabel="Group events by"
+                        className="mt-1"
+                    />
+                </div>
                 <button
                     onClick={() => {
                         setOffset(0);
@@ -367,7 +457,7 @@ export default function EventsPage() {
                                         "Model",
                                         "Thinking",
                                         "Account / provider",
-                                        "Event",
+                                        groupBy === "request" ? "Request / event" : "Event",
                                         "Input",
                                         "Output",
                                         "TPS",
@@ -386,87 +476,196 @@ export default function EventsPage() {
                                 </tr>
                             </thead>
                             <tbody>
-                                {events.map((e) => {
-                                    const m = e.metadata as Record<string, unknown>;
-                                    return (
-                                        <tr
-                                            key={e.id}
-                                            className={`border-ink-800 border-b align-top ${rowTone(e.event_type)}`}
-                                        >
-                                            <td className="text-fog-400 w-44 min-w-44 px-3 py-3 font-mono text-xs whitespace-nowrap">
-                                                {formatDateTime(e.created_at)}
-                                            </td>
-                                            <td className="text-fog-300 w-32 min-w-32 px-3 py-3 text-xs whitespace-nowrap">
-                                                {users.find((u) => u.id === e.user_id)?.name ?? "—"}
-                                            </td>
-                                            <td className="text-fog-300 w-56 min-w-56 px-3 py-3 text-xs">
-                                                <span
-                                                    className="block max-w-56 truncate"
-                                                    title={displayModel(m)}
-                                                >
-                                                    {displayModel(m)}
-                                                </span>
-                                            </td>
-                                            <td className="text-fog-300 w-28 min-w-28 px-3 py-3 text-xs whitespace-nowrap">
-                                                {String(
-                                                    m.thinking_level ?? m.reasoning_level ?? "—",
-                                                )}
-                                            </td>
-                                            <td className="text-fog-400 w-80 max-w-80 min-w-80 px-3 py-3 font-mono text-xs whitespace-normal">
-                                                <span className="block [overflow-wrap:anywhere] break-words">
-                                                    {String(m.account_name ?? "—")}
-                                                </span>
-                                            </td>
-                                            <td className="text-brand-300 w-64 min-w-64 px-3 py-3 font-medium whitespace-normal">
-                                                <div className="flex flex-wrap items-center gap-2">
-                                                    <span>{e.event_type}</span>
-                                                    {(e.event_type === "request.received" ||
-                                                        e.event_type === "response.returned") &&
-                                                    e.archive_hot !== false &&
-                                                    e.request_id?.startsWith("req_") ? (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() =>
-                                                                setCaptureEventId(
-                                                                    e.request_id.slice(4),
-                                                                )
-                                                            }
-                                                            className="text-fog-300 hover:text-brand-200 rounded border border-current/30 px-1.5 py-0.5 text-[10px] font-medium tracking-wide uppercase"
+                                {(() => {
+                                    const groups = new Map<string, ProxyEvent[]>();
+                                    events.forEach((event) => {
+                                        const key = groupValue(event, groupBy);
+                                        const existing = groups.get(key);
+                                        if (existing) existing.push(event);
+                                        else groups.set(key, [event]);
+                                    });
+                                    const rows: ReactNode[] = [];
+                                    groups.forEach((groupEvents, key) => {
+                                        const expanded = expandedRequests.has(key);
+                                        const allEvents = [...groupEvents].sort(
+                                            (a, b) =>
+                                                a.created_at.localeCompare(b.created_at) ||
+                                                a.id.localeCompare(b.id),
+                                        );
+                                        const summary =
+                                            [...allEvents]
+                                                .reverse()
+                                                .find(
+                                                    (event) =>
+                                                        event.event_type === "response.returned",
+                                                ) ?? allEvents[allEvents.length - 1];
+                                        const visibleEvents =
+                                            groupBy === "request"
+                                                ? [
+                                                      { event: summary, summary: true },
+                                                      ...(expanded
+                                                          ? allEvents.map((event) => ({
+                                                                event,
+                                                                summary: false,
+                                                            }))
+                                                          : []),
+                                                  ]
+                                                : groupEvents.map((event) => ({
+                                                      event,
+                                                      summary: false,
+                                                  }));
+                                        visibleEvents.forEach(
+                                            ({ event: e, summary: isSummary }) => {
+                                                const m = e.metadata as Record<string, unknown>;
+                                                rows.push(
+                                                    <tr
+                                                        key={isSummary ? `request-${key}` : e.id}
+                                                        className={`border-ink-800 border-b align-top ${isSummary ? requestTone(allEvents) : rowTone(e.event_type)}`}
+                                                    >
+                                                        <td
+                                                            className={`text-fog-400 w-44 min-w-44 py-3 pr-3 font-mono text-xs whitespace-nowrap ${groupBy === "request" && !isSummary ? "pl-8" : "pl-3"}`}
                                                         >
-                                                            View capture
-                                                        </button>
-                                                    ) : null}
-                                                </div>
-                                            </td>
-                                            <td className="w-24 min-w-24 px-3 py-3 font-mono text-xs whitespace-nowrap">
-                                                {formatCompactNumber(m.input_tokens)}
-                                            </td>
-                                            <td className="w-24 min-w-24 px-3 py-3 font-mono text-xs whitespace-nowrap">
-                                                {formatCompactNumber(m.output_tokens)}
-                                            </td>
-                                            <td className="text-fog-300 w-24 min-w-24 px-3 py-3 font-mono text-xs whitespace-nowrap">
-                                                {m.tokens_per_second == null ? "—" : `${Number(m.tokens_per_second).toFixed(1)} t/s`}
-                                            </td>
-                                            <td className="w-32 min-w-32 px-3 py-3 font-mono text-xs">
-                                                <CacheReadMetric
-                                                    cached={m.cached_input_tokens}
-                                                    input={m.input_tokens}
-                                                />
-                                            </td>
-                                            <td className="w-28 min-w-28 px-3 py-3 font-mono text-xs whitespace-nowrap">
-                                                {formatCompactNumber(m.cache_write_tokens)}
-                                            </td>
-                                            <td className="w-28 min-w-28 px-3 py-3 font-mono text-xs whitespace-nowrap">
-                                                {m.cost_usd == null
-                                                    ? "—"
-                                                    : `$${Number(m.cost_usd).toFixed(4)}`}
-                                            </td>
-                                            <td className="text-fog-300 w-24 min-w-24 px-3 py-3 whitespace-nowrap">
-                                                {e.status_code ?? "—"}
-                                            </td>
-                                        </tr>
-                                    );
-                                })}
+                                                            <span className="block">
+                                                                {formatDateTime(e.created_at)}
+                                                            </span>
+                                                            {isSummary ? (
+                                                                <button
+                                                                    type="button"
+                                                                    aria-expanded={expanded}
+                                                                    aria-label={`${expanded ? "Collapse" : "Expand"} request ${key}`}
+                                                                    onClick={() =>
+                                                                        toggleRequest(key)
+                                                                    }
+                                                                    className="border-brand-400/40 bg-brand-500/10 text-brand-200 hover:bg-brand-500/20 focus-visible:outline-brand-400 mt-2 inline-flex items-center gap-1.5 rounded-md border px-2 py-1.5 font-sans text-xs font-semibold focus-visible:outline-2"
+                                                                >
+                                                                    {expanded ? (
+                                                                        <ChevronDown
+                                                                            size={16}
+                                                                            aria-hidden="true"
+                                                                        />
+                                                                    ) : (
+                                                                        <ChevronRight
+                                                                            size={16}
+                                                                            aria-hidden="true"
+                                                                        />
+                                                                    )}
+                                                                    {expanded
+                                                                        ? "Hide events"
+                                                                        : `Show events (${allEvents.length})`}
+                                                                </button>
+                                                            ) : null}
+                                                        </td>
+                                                        <td className="text-fog-300 w-32 min-w-32 px-3 py-3 text-xs whitespace-nowrap">
+                                                            {displayUser(e, users)}
+                                                        </td>
+                                                        <td className="text-fog-300 w-56 min-w-56 px-3 py-3 text-xs">
+                                                            <span
+                                                                className="block max-w-56 truncate"
+                                                                title={displayModel(m)}
+                                                            >
+                                                                {displayModel(m)}
+                                                            </span>
+                                                        </td>
+                                                        <td className="text-fog-300 w-28 min-w-28 px-3 py-3 text-xs whitespace-nowrap">
+                                                            {String(
+                                                                m.thinking_level ??
+                                                                    m.reasoning_level ??
+                                                                    "—",
+                                                            )}
+                                                        </td>
+                                                        <td className="text-fog-400 w-80 max-w-80 min-w-80 px-3 py-3 font-mono text-xs whitespace-normal">
+                                                            <span className="block [overflow-wrap:anywhere] break-words">
+                                                                {String(m.account_name ?? "—")}
+                                                            </span>
+                                                        </td>
+                                                        <td className="text-brand-300 w-64 min-w-64 px-3 py-3 font-medium whitespace-normal">
+                                                            <div className="flex flex-wrap items-center gap-2">
+                                                                {isSummary ? (
+                                                                    <span>
+                                                                        <span
+                                                                            className="block font-mono text-xs"
+                                                                            title={key}
+                                                                        >
+                                                                            {key.length > 22
+                                                                                ? `${key.slice(0, 12)}…${key.slice(-6)}`
+                                                                                : key}
+                                                                        </span>
+                                                                    </span>
+                                                                ) : (
+                                                                    <span>{e.event_type}</span>
+                                                                )}
+                                                                {(e.event_type ===
+                                                                    "request.received" ||
+                                                                    e.event_type ===
+                                                                        "response.returned") &&
+                                                                e.archive_hot !== false &&
+                                                                e.request_id?.startsWith("req_") ? (
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() =>
+                                                                            setCaptureEventId(
+                                                                                e.request_id.slice(
+                                                                                    4,
+                                                                                ),
+                                                                            )
+                                                                        }
+                                                                        className="text-fog-300 hover:text-brand-200 rounded border border-current/30 px-1.5 py-0.5 text-[10px] font-medium tracking-wide uppercase"
+                                                                    >
+                                                                        View capture
+                                                                    </button>
+                                                                ) : null}
+                                                            </div>
+                                                        </td>
+                                                        <td className="w-24 min-w-24 px-3 py-3 font-mono text-xs whitespace-nowrap">
+                                                            <span
+                                                                title={
+                                                                    typeof m.usage_unavailable_reason ===
+                                                                    "string"
+                                                                        ? m.usage_unavailable_reason
+                                                                        : undefined
+                                                                }
+                                                            >
+                                                                {m.usage_available === false
+                                                                    ? "Unavailable"
+                                                                    : formatCompactNumber(
+                                                                          m.input_tokens,
+                                                                      )}
+                                                            </span>
+                                                        </td>
+                                                        <td className="w-24 min-w-24 px-3 py-3 font-mono text-xs whitespace-nowrap">
+                                                            {formatCompactNumber(m.output_tokens)}
+                                                        </td>
+                                                        <td className="text-fog-300 w-24 min-w-24 px-3 py-3 font-mono text-xs whitespace-nowrap">
+                                                            {m.tokens_per_second == null
+                                                                ? "—"
+                                                                : `${Number(m.tokens_per_second).toFixed(1)} t/s`}
+                                                        </td>
+                                                        <td className="w-32 min-w-32 px-3 py-3 font-mono text-xs">
+                                                            <CacheReadMetric
+                                                                cached={m.cached_input_tokens}
+                                                                input={m.input_tokens}
+                                                            />
+                                                        </td>
+                                                        <td className="w-28 min-w-28 px-3 py-3 font-mono text-xs whitespace-nowrap">
+                                                            {formatCompactNumber(
+                                                                m.cache_write_tokens,
+                                                            )}
+                                                        </td>
+                                                        <td className="w-28 min-w-28 px-3 py-3 font-mono text-xs whitespace-nowrap">
+                                                            {m.cost_usd == null
+                                                                ? "—"
+                                                                : `$${Number(m.cost_usd).toFixed(4)}`}
+                                                        </td>
+                                                        <td className="text-fog-300 w-24 min-w-24 px-3 py-3 whitespace-nowrap">
+                                                            {e.status_code ?? "—"}
+                                                        </td>
+                                                    </tr>,
+                                                );
+                                            },
+                                        );
+                                    });
+                                    return rows;
+                                })()}
                             </tbody>
                         </table>
                     </div>

@@ -204,11 +204,19 @@ capacity or rate-limit result, cooldown, fallback attempt, response, and
 exhaustion. The paginated event table filters by date range, user, model, and
 event type, color-codes event families, and includes model, thinking level,
 account label, status codes, input/output/cache tokens, estimated cost, and
-outcome. Request IDs are intentionally omitted from the normal table.
+outcome. The default **Individual requests** view shows collapsed request summaries.
+Use **Show events / Hide events** to toggle the full lifecycle immediately.
+Pagination counts whole requests; filters select matching requests and their
+complete histories. **All events** retains the flat event view.
 
 Successful and failed requests are retained. With archiving enabled, an event
 can open the exact request and response body from S3-compatible storage;
 authorization and cookie headers are never archived.
+
+Request summaries are green for success, red for failure, and neutral while
+pending. Stream outcomes are recorded after completion rather than inferred
+from HTTP 200 headers. Event records retain a user-name snapshot; deleted users
+with older records without a name are labeled **Deleted user**.
 
 #### Event types and routing outcomes
 
@@ -441,9 +449,6 @@ only Anthropic hosts (`api.anthropic.com`/`anthropic.com`). Verify the relay
 project, health endpoint, and a sanitized Anthropic request before serving
 traffic; deploy app changes through blue-green and keep one Traefik.
 
-### Context-window policy
-
-Presets and users include an **Allow extended context window** policy switch. It is disabled by default and available as a per-user override. The migration explicitly enables it for the existing user `Devasheesh`; provider-specific context capabilities remain negotiated by the upstream endpoint.
 
 ### Pool exhaustion and reset credits
 
@@ -455,3 +460,5 @@ natural resets. The paired Codex proxy uses reset credits only as a last
 resort after model-compatible account capacity is exhausted.
 
 Presets include **Allow API fallback providers**. Users inherit this setting unless they select a per-user fallback override. Clearing the override restores preset inheritance. The migration preserves existing user fallback permissions.
+
+Request metrics are finalized when provider usage arrives. Interrupted or incomplete responses without usage are shown as **Unavailable**, rather than zero-token, zero-cost successes. HTTP 200 alone does not mean generation finished; historical captures without final usage cannot supply exact token counts or TPS.
