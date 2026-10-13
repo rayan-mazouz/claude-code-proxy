@@ -886,6 +886,9 @@ async def proxy_messages(
             )
             if not recoverable or now_monotonic >= pool_wait_deadline:
                 break
+            # End the transaction before waiting: it holds this request's rate-limit reservation and advisory lock
+            # (which would block the user's other requests) and a pooled database connection.
+            db.commit()
             await asyncio.sleep(min(settings.POOL_WAIT_POLL_INTERVAL_SECONDS, pool_wait_deadline - now_monotonic))
             db.expire_all()
             exclude_ids.clear()
@@ -916,6 +919,7 @@ async def proxy_messages(
                 await candidate.aclose()
                 connection = egress.get_pool().acquire(account.egress_target_id, priority=user.priority)
                 access_token = rotation.ensure_fresh_token(db, account, rejected_token=access_token, egress_target=connection.target)
+                db.commit()
                 candidate = await _send_with_account_limit(
                     connection,
                     request.method,
@@ -1076,11 +1080,14 @@ async def proxy_messages(
             connection = None
             try:
                 connection = egress.get_pool().acquire(fallback.egress_target_id, priority=user.priority)
+                fallback_headers = _build_fallback_headers(request.headers, anthropic_fallbacks.api_key(fallback))
+                # Release the database connection while waiting on the provider.
+                db.commit()
                 candidate = await _send_with_account_limit(
                     connection,
                     request.method,
                     fallback_url,
-                    _build_fallback_headers(request.headers, anthropic_fallbacks.api_key(fallback)),
+                    fallback_headers,
                     body,
                     fallback,
                     user.priority,
@@ -1235,6 +1242,9 @@ async def proxy_messages(
         db,
         {key: value for key, value in resp.headers.items() if key.lower() not in _STRIP_RESPONSE_HEADERS},
     )
+    # Return the request's database connection to the pool before relaying the body. Responses can take minutes,
+    # and holding a connection that long would cap concurrent requests at the pool size.
+    db.commit()
     upstream_request_id = resp.headers.get("request-id") or resp.headers.get("x-request-id")
     content_type = resp.headers.get("content-type", "")
     _emit_event(

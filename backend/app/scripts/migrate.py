@@ -313,10 +313,39 @@ def sync_canonical_schema() -> None:
         )
 
 
+# Indexes added after the schema was squashed. They are built CONCURRENTLY so a deployment against a large, live
+# database never blocks proxy traffic writing to these tables while the index builds.
+CONCURRENT_INDEXES = (
+    ("ix_proxy_events_user_type_created", "proxy_events", "user_id, event_type, created_at"),
+    ("ix_proxy_events_key_type_created", "proxy_events", "api_key_id, event_type, created_at"),
+    ("ix_usage_records_user_created", "usage_records", "user_id, created_at"),
+    ("ix_usage_records_key_created", "usage_records", "api_key_id, created_at"),
+)
+
+
+def ensure_concurrent_indexes() -> None:
+    """Create the post-squash indexes without taking write locks; safe to run on every deployment."""
+    # CREATE INDEX CONCURRENTLY cannot run inside a transaction block.
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+        for name, table, columns in CONCURRENT_INDEXES:
+            # An interrupted concurrent build leaves an INVALID index behind that IF NOT EXISTS would keep forever.
+            invalid = connection.execute(
+                text(
+                    "SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+                    "WHERE c.relname = :name AND c.relnamespace = current_schema()::regnamespace AND NOT i.indisvalid"
+                ),
+                {"name": name},
+            ).first()
+            if invalid is not None:
+                connection.execute(text(f"DROP INDEX CONCURRENTLY IF EXISTS {name}"))
+            connection.execute(text(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} ON {table} ({columns})"))
+
+
 def main() -> None:
     normalize_legacy_head()
     command.upgrade(Config("alembic.ini"), "head")
     sync_canonical_schema()
+    ensure_concurrent_indexes()
 
 
 if __name__ == "__main__":

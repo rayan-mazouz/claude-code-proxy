@@ -222,6 +222,9 @@ class ProxyEventDb(DatabaseBase):
         Index("ix_proxy_events_created_at", "created_at"),
         Index("ix_proxy_events_request_id", "request_id"),
         Index("ix_proxy_events_user_id", "user_id"),
+        # Per-user and per-key rate-limit windows count recent events of one type on every proxied request.
+        Index("ix_proxy_events_user_type_created", "user_id", "event_type", "created_at"),
+        Index("ix_proxy_events_key_type_created", "api_key_id", "event_type", "created_at"),
     )
 
 
@@ -333,6 +336,9 @@ class UsageRecordDb(DatabaseBase):
         Index("ix_usage_records_account_id", "account_id"),
         Index("ix_usage_records_fallback_provider_id", "fallback_provider_id"),
         Index("ix_usage_records_created_at", "created_at"),
+        # Budget checks sum one user's or key's usage since a point in time on every proxied request.
+        Index("ix_usage_records_user_created", "user_id", "created_at"),
+        Index("ix_usage_records_key_created", "api_key_id", "created_at"),
     )
 
     def __repr__(self):

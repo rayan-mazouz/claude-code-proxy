@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from app import config
 from app.logger import configure_logging, get_logger
-from app.utils import egress, notifications, oauth, provider_health, quota_attribution, rotation, spare_capacity, warmup
+from app.utils import egress, events, notifications, oauth, provider_health, quota_attribution, rotation, spare_capacity, warmup
 from app.utils.models.api import ProviderHealth as ProviderHealthEnum
 from app.utils.postgres import AccountDb, get_db_cm
 
@@ -62,6 +62,13 @@ def refresh_once() -> None:
                     code or "unknown",
                     type(exc).__name__,
                 )
+
+    try:
+        pruned = events.prune_rate_limit_reservations()
+        if pruned:
+            logger.info("Pruned %s expired rate-limit reservation(s)", pruned)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Pruning rate-limit reservations failed (error_type=%s): %s", type(exc).__name__, exc)
 
     # Keep warm-up independent of inference traffic. The advisory lock inside
     # warm_pool_if_needed prevents overlap with request-triggered warm-up tasks.

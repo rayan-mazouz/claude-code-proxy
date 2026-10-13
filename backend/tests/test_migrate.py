@@ -34,3 +34,22 @@ def test_sync_canonical_schema_adds_rotation_threshold_and_fallback_columns():
     assert inspect(engine).has_table("anthropic_fallbacks")
     assert {"fallback_provider_id", "billed_cost_usd"} <= usage_columns
     assert user_additions <= {column["name"] for column in inspect(engine).get_columns("users")}
+
+
+def test_concurrent_indexes_are_idempotent_and_replace_invalid_builds():
+    from app.scripts.migrate import CONCURRENT_INDEXES, ensure_concurrent_indexes
+
+    with engine.begin() as connection:
+        for name, _, _ in CONCURRENT_INDEXES:
+            connection.execute(text(f"DROP INDEX IF EXISTS {name}"))
+        # Simulate an interrupted CREATE INDEX CONCURRENTLY, which leaves an invalid index behind.
+        connection.execute(text("CREATE INDEX ix_usage_records_user_created ON usage_records (user_id, created_at)"))
+        connection.execute(text("UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'ix_usage_records_user_created'::regclass"))
+    ensure_concurrent_indexes()
+    ensure_concurrent_indexes()
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text("SELECT c.relname, i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = ANY(:names)"),
+            {"names": [name for name, _, _ in CONCURRENT_INDEXES]},
+        ).all()
+    assert sorted(rows) == sorted((name, True) for name, _, _ in CONCURRENT_INDEXES)
