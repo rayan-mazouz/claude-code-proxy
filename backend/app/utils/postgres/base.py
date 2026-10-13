@@ -15,12 +15,13 @@ settings = get_settings()
 
 # Create the engine
 engine = create_engine(
-    settings.get_postgres_uri(),
-    pool_size=5,  # 5 permanent conns per worker (kept open always)
-    max_overflow=195,  # 195 overflow conns per worker (created/destroyed on demand)
+    settings.get_postgres_url(),
+    pool_size=settings.DB_POOL_SIZE,  # connections kept open per process
+    max_overflow=settings.DB_MAX_OVERFLOW,  # extra connections opened under load, closed when returned
+    pool_timeout=settings.DB_POOL_TIMEOUT_SECONDS,  # wait this long for a free connection before failing
     pool_pre_ping=True,  # drop stale connections before use
-    pool_timeout=0,  # raise immediately if no conn available
-    connect_args={"options": "-c timezone=utc"},
+    pool_recycle=1800,  # replace connections before intermediaries (NAT, PgBouncer) silently drop them
+    connect_args={"options": "-c timezone=utc", "application_name": "claude-code-proxy"},
 )
 
 # Create the session factory
@@ -32,9 +33,9 @@ DatabaseBase = declarative_base()
 
 def init_database() -> None:
     """Create the target database if it does not yet exist. Called by the Alembic entrypoint before migrating."""
-    uri = settings.get_postgres_uri()
-    if not database_exists(uri):
-        create_database(uri)
+    url = settings.get_postgres_url()
+    if not database_exists(url):
+        create_database(url)
 
 
 def get_db():

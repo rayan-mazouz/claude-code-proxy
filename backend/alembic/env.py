@@ -11,7 +11,8 @@ from app.config import get_settings
 settings = get_settings()
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.get_postgres_uri())
+# ConfigParser treats "%" as interpolation, so escape it in case the password contains one.
+config.set_main_option("sqlalchemy.url", settings.get_postgres_uri().replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

@@ -114,7 +114,7 @@ def update_telegram_settings(
     was_installed = bool(channel.enabled and channel.secret_enc and channel.destination)
     if request.bot_token is not None:
         if ":" not in request.bot_token:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Telegram bot token is invalid")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Telegram bot token is invalid")
         channel.secret_enc = crypto.encrypt(request.bot_token)
     if request.chat_id is not None:
         channel.destination = request.chat_id
@@ -123,11 +123,11 @@ def update_telegram_settings(
         try:
             notifications.validate_timezone(request.timezone)
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
         channel.timezone = request.timezone
     if request.enabled and (not channel.secret_enc or not channel.destination):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Add a Telegram bot token and group/chat ID before enabling the channel.",
         )
     channel.enabled = request.enabled
@@ -151,7 +151,7 @@ def update_notification_rule(
     try:
         notifications.validate_template(event_type, request.template)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
     channel = _get_or_create_telegram(db)
     rule = next(rule for rule in notifications.ensure_default_rules(db, channel) if rule.event_type == event_type)
     rule.enabled = request.enabled
@@ -169,7 +169,7 @@ def test_telegram(
 ) -> TestNotificationResponse:
     channel = _telegram_channel(db)
     if channel is None or not channel.secret_enc or not channel.destination:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Save a bot token and destination first.")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Save a bot token and destination first.")
     now = datetime.now(timezone.utc)
     try:
         notifications.send_telegram(

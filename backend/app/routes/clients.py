@@ -16,4 +16,4 @@ _STATUSLINE_PATH = _ROUTE_DIR.parents[1] / "clients" / "claude-code-statusline.s
 )
 def statusline_script() -> PlainTextResponse:
     """Serve the Claude Code status line script so users can curl it directly."""
-    return PlainTextResponse(_STATUSLINE_PATH.read_text(), media_type="text/x-shellscript")
+    return PlainTextResponse(_STATUSLINE_PATH.read_text(encoding="utf-8"), media_type="text/x-shellscript")

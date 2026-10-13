@@ -153,7 +153,7 @@ def bulk_set_user_priority(
 ) -> ListUsersResponse:
     """Assign one priority to multiple users atomically without renumbering others."""
     if len(request.user_ids) != len(set(request.user_ids)):
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="User IDs must be unique")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="User IDs must be unique")
     selected = db.query(UserDb).filter(UserDb.id.in_(request.user_ids)).with_for_update().all()
     selected_ids = {user.id for user in selected}
     requested_ids = set(request.user_ids)

@@ -7,7 +7,7 @@ import os
 import secrets as _secrets
 
 from cryptography.fernet import Fernet
-from testcontainers.postgres import PostgresContainer
+from testcontainers.community.postgres import PostgresContainer
 
 TEST_ADMIN_PASSWORD = "test-admin-password-123"
 
@@ -63,6 +63,8 @@ def reset_db():
         conn.execute(text("DROP TYPE IF EXISTS account_status"))
         conn.execute(text("DROP TYPE IF EXISTS provider_health"))
     DatabaseBase.metadata.create_all(engine)
+    # Recreated enum types get new OIDs; pooled connections may hold prepared statements bound to the old ones.
+    engine.dispose()
     yield
 
 

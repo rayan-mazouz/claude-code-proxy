@@ -32,7 +32,7 @@ services:
         max-file: "3"
     build: ./backend
     image: claude-code-proxy/backend:latest
-    command: uv run gunicorn app.main:app --workers 4 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:80 --log-level info
+    command: uv run gunicorn app.main:app --workers 4 --worker-class uvicorn_worker.UvicornWorker --bind 0.0.0.0:80 --log-level info
     restart: unless-stopped
     env_file: ./.env
     environment:

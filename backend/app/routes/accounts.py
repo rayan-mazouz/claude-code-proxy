@@ -104,7 +104,7 @@ def bulk_set_account_priority(
 ) -> ListAccountsResponse:
     """Assign one priority to multiple accounts atomically without renumbering others."""
     if len(request.account_ids) != len(set(request.account_ids)):
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Account IDs must be unique")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Account IDs must be unique")
     selected = db.query(AccountDb).filter(AccountDb.id.in_(request.account_ids)).with_for_update().all()
     selected_ids = {account.id for account in selected}
     requested_ids = set(request.account_ids)
@@ -131,7 +131,7 @@ def reorder_accounts(
     requested = request.account_ids
     if len(requested) != len(set(requested)) or set(requested) != {account.id for account in accounts}:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Priority order must contain every account exactly once.",
         )
     by_id = {account.id: account for account in accounts}
@@ -336,7 +336,7 @@ def update_account(
         target_id = request.egress_target_id.strip() if request.egress_target_id else pool.default_target().id
         if not pool.has_target(target_id):
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"Egress target '{target_id}' is not configured or enabled",
             )
         account.egress_target_id = target_id

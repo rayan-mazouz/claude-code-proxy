@@ -8,6 +8,7 @@ from typing import Optional
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL
 
 # Repo-root .env, loaded for local development; in containers the values come from the process environment.
 _ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
@@ -67,8 +68,27 @@ class Settings(BaseSettings):
     POSTGRES_PORT: str
     POSTGRES_DB: str
 
+    def get_postgres_url(self) -> URL:
+        # Built structurally so credentials containing URL metacharacters (@ : / % #) are escaped correctly.
+        return URL.create(
+            # psycopg 3, named explicitly so the driver never changes with SQLAlchemy's default.
+            "postgresql+psycopg",
+            username=self.POSTGRES_USER,
+            password=self.POSTGRES_PASSWORD,
+            host=self.POSTGRES_HOST,
+            port=int(self.POSTGRES_PORT),
+            database=self.POSTGRES_DB,
+        )
+
     def get_postgres_uri(self) -> str:
-        return f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+        return self.get_postgres_url().render_as_string(hide_password=False)
+
+    # Connection pool, per process. The backend runs several worker processes plus three sidecars against one
+    # PostgreSQL server (100 connections by default), so the worst case -- every process at pool size plus
+    # overflow -- must stay under that ceiling. Requests only hold a connection while they talk to the database.
+    DB_POOL_SIZE: int = Field(default=5, ge=1, le=100)
+    DB_MAX_OVERFLOW: int = Field(default=10, ge=0, le=200)
+    DB_POOL_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0, le=600)
 
     # Secrets -- FERNET_KEY encrypts OAuth tokens at rest; ADMIN_* is the dashboard login; JWT_SECRET signs admin sessions.
     FERNET_KEY: str

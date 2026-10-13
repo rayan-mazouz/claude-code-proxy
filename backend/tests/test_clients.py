@@ -13,8 +13,8 @@ def _assert_unix_installer_keeps_key_out_of_argv(script: str) -> None:
 
 
 def test_public_installers_never_put_key_in_command_or_process_arguments():
-    unix_script = (REPOSITORY_ROOT / "frontend/public/install.sh").read_text()
-    powershell_script = (REPOSITORY_ROOT / "frontend/public/install.ps1").read_text()
+    unix_script = (REPOSITORY_ROOT / "frontend/public/install.sh").read_text(encoding="utf-8")
+    powershell_script = (REPOSITORY_ROOT / "frontend/public/install.ps1").read_text(encoding="utf-8")
 
     _assert_unix_installer_keeps_key_out_of_argv(unix_script)
     assert "CC_PROXY_KEY" not in powershell_script
@@ -24,7 +24,7 @@ def test_public_installers_never_put_key_in_command_or_process_arguments():
 
 
 def test_dashboard_generated_commands_do_not_interpolate_revealed_secret():
-    users_page = (REPOSITORY_ROOT / "frontend/src/app/(dashboard)/users/page.tsx").read_text()
+    users_page = (REPOSITORY_ROOT / "frontend/src/app/(dashboard)/users/page.tsx").read_text(encoding="utf-8")
     commands = users_page[users_page.index("const unixCmd") : users_page.index("const installCmd")]
 
     assert "${secret}" not in commands
@@ -36,6 +36,6 @@ def test_served_statusline_is_the_repository_copy(client):
     response = client.get("/api/v1/clients/claude-code-statusline.sh")
 
     assert response.status_code == 200
-    assert response.text == (REPOSITORY_ROOT / "backend/clients/claude-code-statusline.sh").read_text()
+    assert response.text == (REPOSITORY_ROOT / "backend/clients/claude-code-statusline.sh").read_text(encoding="utf-8")
     assert 'usage_tmp="${usage_cache}.tmp.$$"' in response.text
     assert "umask 077" in response.text
