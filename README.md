@@ -428,6 +428,11 @@ The main directories are `backend/` (FastAPI, SQLAlchemy, Alembic), `frontend/`
 (Next.js dashboard), `clients/` (Claude Code helpers), and the Compose/deployment
 files at the repository root.
 
+## Roadmap
+
+Planned work, with priorities and completion criteria, is tracked in
+[docs/ROADMAP.md](docs/ROADMAP.md).
+
 ## Contributing and project policy
 
 Issues and pull requests are genuinely welcome. Feel free to open an issue for
