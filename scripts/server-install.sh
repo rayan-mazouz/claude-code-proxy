@@ -22,7 +22,7 @@
 #   CCP_HTTP_PORT      Host port Traefik listens on (default: 18437)
 #   CCP_BIND_ADDRESS   Host IPv4 address to bind, e.g. a VPN interface IP (default: 0.0.0.0)
 #   CCP_DOMAIN         Hostname used in dashboard links (default: localhost)
-#   CCP_ALLOWED_MODELS Comma-separated model allowlist (default: claude-opus-5-5,claude-sonnet-5-5)
+#   CCP_ALLOWED_MODELS Comma-separated model allowlist (default: claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5)
 #
 # The checkout is never edited: server-specific Compose changes live in
 # ${OVERRIDE_FILE}, and all settings live in the checkout's ignored .env.
@@ -48,7 +48,7 @@ DEFAULT_REPO_URL="https://github.com/rayan-mazouz/claude-code-proxy.git"
 DEFAULT_HTTP_PORT=18437
 DEFAULT_BIND_ADDRESS="0.0.0.0"
 DEFAULT_DOMAIN="localhost"
-DEFAULT_ALLOWED_MODELS="claude-opus-5-5,claude-sonnet-5-5"
+DEFAULT_ALLOWED_MODELS="claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5"
 
 REPO_URL="${CCP_REPO_URL:-${DEFAULT_REPO_URL}}"
 REPO_BRANCH="${CCP_REPO_BRANCH:-main}"
