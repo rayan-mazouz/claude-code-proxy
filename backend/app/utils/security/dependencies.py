@@ -1,6 +1,7 @@
 # Path: app/utils/security/dependencies.py
 # Description: FastAPI dependencies for admin sessions and proxy-user authentication.
 
+import hmac
 import json
 import uuid
 from dataclasses import dataclass
@@ -14,7 +15,16 @@ from app.utils.postgres import ApiKeyDb, DashboardMemberDb, UserDb, get_db
 
 from .keys import hash_key
 from .permissions import has_permission, normalize_permissions, required_permission, verify_password
-from .tokens import decode_admin_token, verify_admin_credentials
+from .tokens import decode_admin_token, owner_session_version, session_version, verify_admin_credentials
+
+# Verified against when a login names no existing member, so an unknown username costs the same scrypt work as a
+# wrong password and response timing does not reveal which usernames exist.
+_DUMMY_PASSWORD_HASH = "scrypt$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+
+def _same_version(claims: dict, expected: str) -> bool:
+    presented = claims.get("sv")
+    return isinstance(presented, str) and hmac.compare_digest(presented.encode(), expected.encode())
 
 
 @dataclass(frozen=True)
@@ -28,7 +38,7 @@ class AdminPrincipal:
 def _principal_from_claims(claims: dict, db: Session) -> Optional[AdminPrincipal]:
     member_id = claims.get("member_id")
     if not member_id:
-        if claims.get("sub") == get_settings().ADMIN_USERNAME:
+        if claims.get("sub") == get_settings().ADMIN_USERNAME and _same_version(claims, owner_session_version()):
             subject = str(claims.get("sub"))
             return AdminPrincipal(subject, None, "owner", frozenset({"*"}))
         return None
@@ -36,7 +46,7 @@ def _principal_from_claims(claims: dict, db: Session) -> Optional[AdminPrincipal
         member = db.get(DashboardMemberDb, uuid.UUID(str(member_id)))
     except (ValueError, TypeError):
         return None
-    if member is None or not member.active:
+    if member is None or not member.active or not _same_version(claims, session_version(member.password_hash)):
         return None
     try:
         values = json.loads(member.permissions_json or "[]")
@@ -73,7 +83,10 @@ def require_admin(principal: AdminPrincipal = Depends(require_admin_principal)) 
 def authenticate_dashboard_member(username: str, password: str, db: Session) -> Optional[DashboardMemberDb]:
     """Return an active database member when credentials are valid."""
     member = db.query(DashboardMemberDb).filter(DashboardMemberDb.username == username.strip().lower()).first()
-    if member is None or not member.active or not verify_password(password, member.password_hash):
+    if member is None:
+        verify_password(password, _DUMMY_PASSWORD_HASH)
+        return None
+    if not verify_password(password, member.password_hash) or not member.active:
         return None
     return member
 

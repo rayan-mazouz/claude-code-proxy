@@ -44,6 +44,16 @@ app = FastAPI(
 )
 
 
+# Applied to every API response unless a route set its own value. The API returns session tokens, keys and
+# usage data, so nothing may be cached, sniffed into another content type, framed, or leak via Referer.
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+}
+
+
 # Advanced Middleware - request correlation + timing
 class CustomMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
@@ -60,6 +70,8 @@ class CustomMiddleware(BaseHTTPMiddleware):
 
             response.headers["X-Process-Time"] = str(process_time)
             response.headers["X-Request-Id"] = request_id
+            for header, value in _SECURITY_HEADERS.items():
+                response.headers.setdefault(header, value)
 
             logger.info(f"Request completed: {request.method} {request.url.path} - Status: {response.status_code} - Time: {process_time:.3f}s")
             return response

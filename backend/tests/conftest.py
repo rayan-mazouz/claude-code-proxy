@@ -65,6 +65,7 @@ def reset_db():
     DatabaseBase.metadata.create_all(engine)
     # Recreated enum types get new OIDs; pooled connections may hold prepared statements bound to the old ones.
     engine.dispose()
+    security.reset_login_throttle()
     yield
 
 

@@ -24,19 +24,37 @@ router = APIRouter(tags=["Dashboard Team"], prefix="/team")
 
 
 def _member_response(member: DashboardMemberDb) -> DashboardMember:
-    try:
-        values = json.loads(member.permissions_json or "[]")
-        permissions = sorted(security.normalize_permissions(values))
-    except (TypeError, ValueError):
-        permissions = []
     return DashboardMember(
         id=member.id,
         username=member.username,
-        permissions=permissions,
+        permissions=sorted(_member_permissions(member)),
         active=member.active,
         created_at=member.created_at,
         last_login_at=member.last_login_at,
     )
+
+
+def _member_permissions(member: DashboardMemberDb) -> frozenset[str]:
+    try:
+        return security.normalize_permissions(json.loads(member.permissions_json or "[]"))
+    except (TypeError, ValueError):
+        return frozenset()
+
+
+def _require_delegable(principal, permissions: frozenset[str] | set[str] | list[str]) -> None:
+    """A member may only grant, or manage someone holding, permissions they hold themselves.
+
+    Without this rule anyone allowed to manage the team could create an account with every permission and use it
+    to take over pooled accounts or API keys. The environment-configured owner holds the wildcard and is exempt.
+    """
+    if "*" in principal.permissions:
+        return
+    missing = sorted(set(permissions) - set(principal.permissions))
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"You cannot grant or manage permissions you do not hold: {', '.join(missing)}",
+        )
 
 
 def _validate_permissions(values: list[str]) -> list[str]:
@@ -45,12 +63,12 @@ def _validate_permissions(values: list[str]) -> list[str]:
     unknown = sorted(value for value in requested if not security.normalize_permissions([value]))
     if unknown:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Unknown permission(s): {', '.join(unknown)}",
         )
     if not permissions:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Select at least one permission",
         )
     return permissions
@@ -74,7 +92,7 @@ def list_members(
 @router.post("/members", response_model=DashboardMemberResponse, status_code=status.HTTP_201_CREATED)
 def create_member(
     request: CreateDashboardMemberRequest,
-    _: object = Depends(security.require_admin_principal),  # noqa: B008
+    principal=Depends(security.require_admin_principal),  # noqa: B008
     db: Session = Depends(get_db),  # noqa: B008
 ) -> DashboardMemberResponse:
     username = request.username.strip().lower()
@@ -83,6 +101,7 @@ def create_member(
     if db.query(DashboardMemberDb).filter(DashboardMemberDb.username == username).first() is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Dashboard username already exists")
     permissions = _validate_permissions(request.permissions)
+    _require_delegable(principal, permissions)
     now = datetime.now(timezone.utc)
     member = DashboardMemberDb(
         id=uuid.uuid4(),
@@ -108,13 +127,16 @@ def update_member(
     member = db.get(DashboardMemberDb, member_id)
     if member is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard member not found")
+    _require_delegable(principal, _member_permissions(member))
     if request.permissions is not None:
-        member.permissions_json = json.dumps(_validate_permissions(request.permissions), separators=(",", ":"))
+        permissions = _validate_permissions(request.permissions)
+        _require_delegable(principal, permissions)
+        member.permissions_json = json.dumps(permissions, separators=(",", ":"))
     if request.password is not None:
         member.password_hash = security.hash_password(request.password)
     if request.active is not None:
         if principal.member_id == member.id and request.active is False:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="You cannot disable your own account")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="You cannot disable your own account")
         member.active = request.active
     member.updated_at = datetime.now(timezone.utc)
     db.commit()
@@ -128,9 +150,10 @@ def delete_member(
     db: Session = Depends(get_db),  # noqa: B008
 ) -> None:
     if principal.member_id == member_id:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="You cannot delete your own account")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="You cannot delete your own account")
     member = db.get(DashboardMemberDb, member_id)
     if member is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard member not found")
+    _require_delegable(principal, _member_permissions(member))
     db.delete(member)
     db.commit()
