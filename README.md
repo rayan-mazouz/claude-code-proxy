@@ -32,6 +32,28 @@ to use an existing Postgres instance before it builds, configures credentials,
 creates the first user, installs the client helper, and verifies the deployment.
 No manual installation steps are required.
 
+### Single-server install script
+
+For a dedicated Debian or Ubuntu server, `scripts/server-install.sh` installs
+Docker, creates an unprivileged `claudeproxy` user running rootless Docker,
+generates every secret, and starts the stack behind the bundled Traefik on
+plain HTTP (port 18437 by default), ready to sit behind your own TLS proxy or
+VPN:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/rayan-mazouz/claude-code-proxy/main/scripts/server-install.sh
+chmod +x server-install.sh
+sudo CCP_BIND_ADDRESS=10.8.0.1 ./server-install.sh install   # bind address is optional
+sudo ./server-install.sh update     # backs up the database, then pulls and redeploys
+sudo ./server-install.sh backup     # on-demand database and .env backup
+sudo ./server-install.sh status
+```
+
+Re-running `install` on an existing server updates it in place and keeps its
+settings. The admin credentials are written to
+`/root/claude-code-proxy-admin.txt`. Updates restart containers in place;
+use the blue-green flow below when you need zero-downtime rollouts.
+
 ### Optional macOS menu-bar app
 
 If you use the dashboard from a Mac, the companion menu-bar app provides compact
@@ -346,6 +368,8 @@ are:
 | `ARCHIVE_ENABLED` | `false` | Store exact request/response bodies in S3-compatible storage |
 | `ARCHIVE_REQUIRED` | `true` | Fail closed when a required archive write fails |
 | `WARMUP_ENABLED` | `true` | Enable demand-triggered/manual warm-up |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | `5` / `10` | Database connections per process; keep workers × (size + overflow) under PostgreSQL's `max_connections` |
+| `DB_POOL_TIMEOUT_SECONDS` | `30` | How long a request waits for a free database connection |
 
 ## Production deployment
 
@@ -385,6 +409,12 @@ S3-compatible bucket; prompt and tool content may contain sensitive data, so
 restrict bucket access and configure retention. Authorization and cookie
 headers are excluded from captures. Review `SECURITY.md` before exposing the
 dashboard publicly.
+
+Dashboard sessions are bound to the credential they were issued for: changing
+`ADMIN_PASSWORD` or a member's password signs out every existing session.
+Failed sign-ins are throttled per account and per client address (when the
+gateway can see real client addresses). Team members can only grant, or
+manage members holding, permissions they have themselves.
 
 ## Development
 
