@@ -5,26 +5,31 @@
 // Wraps the authenticated dashboard area.
 // ---------------------------------------------------------------------------
 
-import { useEffect, useState } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import { getToken } from "@/lib/api";
 import { LoadingState } from "./ui";
 
+// Tokens live in localStorage; re-check when another tab signs in or out.
+function subscribe(onChange: () => void) {
+    window.addEventListener("storage", onChange);
+    return () => window.removeEventListener("storage", onChange);
+}
+
+const hasToken = () => Boolean(getToken());
+// During server rendering the token is unknown, so render the loading state.
+const unknownOnServer = () => null;
+
 export function AuthGuard({ children }: { children: React.ReactNode }) {
     const router = useRouter();
-    const [checked, setChecked] = useState(false);
+    const signedIn = useSyncExternalStore(subscribe, hasToken, unknownOnServer);
 
     useEffect(() => {
-        if (!getToken()) {
-            router.replace("/login");
-            return;
-        }
-        setChecked(true);
-    }, [router]);
+        if (signedIn === false) router.replace("/login");
+    }, [router, signedIn]);
 
-    // Until we've confirmed a token client-side, render a spinner so we never
-    // flash protected content.
-    if (!checked) {
+    // Never flash protected content before the token check has run.
+    if (!signedIn) {
         return (
             <div className="flex min-h-screen items-center justify-center">
                 <LoadingState label="Checking session…" />

@@ -131,22 +131,22 @@ export default function TeamPage() {
     const [username, setUsername] = useState("");
     const [password, setPassword] = useState("");
 
-    const load = useCallback(async () => {
-        setLoading(true);
-        setError(null);
-        try {
-            const [memberResponse, permissionResponse] = await Promise.all([
-                api.teamMembers(),
-                api.teamPermissions(),
-            ]);
-            setMembers(memberResponse.members);
-            setAvailablePermissions(permissionResponse.permissions);
-        } catch (err) {
-            setError(err instanceof Error ? err.message : "Unable to load team members.");
-        } finally {
-            setLoading(false);
-        }
-    }, []);
+    const load = useCallback(
+        () =>
+            Promise.all([api.teamMembers(), api.teamPermissions()]).then(
+                ([memberResponse, permissionResponse]) => {
+                    setError(null);
+                    setMembers(memberResponse.members);
+                    setAvailablePermissions(permissionResponse.permissions);
+                    setLoading(false);
+                },
+                (err: unknown) => {
+                    setError(err instanceof Error ? err.message : "Unable to load team members.");
+                    setLoading(false);
+                },
+            ),
+        [],
+    );
 
     useEffect(() => {
         void load();
@@ -210,15 +210,22 @@ export default function TeamPage() {
     return (
         <div className="space-y-5">
             <header>
-                <h1 className="text-fog-100 font-serif text-2xl font-semibold tracking-tight">
-                    Team access
-                </h1>
+                <h1 className="text-fog-100 text-2xl font-semibold tracking-tight">Team access</h1>
                 <p className="text-fog-400 mt-0.5 text-sm">
                     Create members and grant exact dashboard permissions. No display names or role
                     presets are required.
                 </p>
             </header>
-            {error ? <ErrorState message={error} onRetry={() => void load()} /> : null}
+            {error ? (
+                <ErrorState
+                    message={error}
+                    onRetry={() => {
+                        setLoading(true);
+                        setError(null);
+                        void load();
+                    }}
+                />
+            ) : null}
             <Card className="p-5">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>

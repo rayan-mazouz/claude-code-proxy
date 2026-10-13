@@ -91,6 +91,28 @@ export class ApiError extends Error {
 
 // --- core request ----------------------------------------------------------
 
+// FastAPI reports validation failures as a list of {loc, msg} objects; flatten
+// them into one readable sentence instead of "[object Object]".
+function errorDetail(data: unknown, status: number): string {
+    const detail = data && typeof data === "object" && "detail" in data ? data.detail : null;
+    if (typeof detail === "string" && detail) return detail;
+    if (Array.isArray(detail)) {
+        const messages = detail
+            .map((item) => {
+                if (!item || typeof item !== "object") return String(item);
+                const { loc, msg } = item as { loc?: unknown; msg?: unknown };
+                const field = Array.isArray(loc)
+                    ? loc.filter((part) => part !== "body").join(".")
+                    : "";
+                return field ? `${field}: ${String(msg)}` : String(msg);
+            })
+            .filter(Boolean);
+        if (messages.length) return messages.join("; ");
+    }
+    if (status === 429) return "Too many requests. Wait a moment and try again.";
+    return `Request failed (${status})`;
+}
+
 interface RequestOptions {
     method?: string;
     body?: unknown;
@@ -121,7 +143,8 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     if (res.status === 401 && !skipAuthRedirect) {
         clearToken();
         if (typeof window !== "undefined") {
-            window.location.href = "/login";
+            // A full navigation also discards every piece of in-memory dashboard state.
+            window.location.replace(new URL("/login", window.location.origin));
         }
         throw new ApiError("Session expired. Please sign in again.", 401);
     }
@@ -138,11 +161,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     }
 
     if (!res.ok) {
-        const detail =
-            data && typeof data === "object" && "detail" in data
-                ? String((data as { detail: unknown }).detail)
-                : `Request failed (${res.status})`;
-        throw new ApiError(detail, res.status);
+        throw new ApiError(errorDetail(data, res.status), res.status);
     }
 
     return data as T;

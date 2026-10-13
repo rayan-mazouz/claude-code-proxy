@@ -237,8 +237,16 @@ export default function AccountsPage() {
     const [deleteTarget, setDeleteTarget] = useState<Account | null>(null);
     const [deleting, setDeleting] = useState(false);
     const [showAdd, setShowAdd] = useState(false);
-    const [accountFilter, setAccountFilter] = useState<AccountFilter>("usable");
-    const [accountSearch, setAccountSearch] = useState("");
+    // Filters start from the URL (so links restore them) and are written back on change.
+    const [accountFilter, setAccountFilter] = useState<AccountFilter>(() => {
+        const candidate = new URLSearchParams(queryString).get("section");
+        return candidate === "all" || candidate === "authenticated" || candidate === "usable"
+            ? candidate
+            : "usable";
+    });
+    const [accountSearch, setAccountSearch] = useState(
+        () => new URLSearchParams(queryString).get("search") ?? "",
+    );
     const loadRequestId = useRef(0);
 
     const updateUrl = useCallback(
@@ -256,15 +264,6 @@ export default function AccountsPage() {
         [pathname, queryString, router],
     );
 
-    useEffect(() => {
-        const params = new URLSearchParams(queryString);
-        const candidate = params.get("section");
-        if (candidate === "all" || candidate === "authenticated" || candidate === "usable") {
-            setAccountFilter(candidate);
-        }
-        setAccountSearch(params.get("search") ?? "");
-    }, [queryString]);
-
     // A "tick" used to re-render countdowns every second.
     const [, setTick] = useState(0);
     useEffect(() => {
@@ -272,24 +271,28 @@ export default function AccountsPage() {
         return () => clearInterval(id);
     }, []);
 
-    const load = useCallback(async (background = false) => {
+    // Loading and error flags only change after the request settles; the initial
+    // state already shows the spinner, and the retry button resets it explicitly.
+    const load = useCallback(() => {
         const requestId = ++loadRequestId.current;
-        if (!background) setLoading(true);
-        if (!background) setError(null);
-        try {
-            const [loaded, targets] = await Promise.all([api.accounts(), api.egressTargets()]);
-            if (requestId !== loadRequestId.current) return;
-            setAccounts(loaded);
-            setEgressTargets(targets);
-            setSavedPriorities(
-                Object.fromEntries(loaded.map((account) => [account.id, account.priority])),
-            );
-        } catch (err) {
-            if (requestId !== loadRequestId.current) return;
-            setError(err instanceof Error ? err.message : "Failed to load accounts.");
-        } finally {
-            if (requestId === loadRequestId.current) setLoading(false);
-        }
+        const isCurrent = () => requestId === loadRequestId.current;
+        return Promise.all([api.accounts(), api.egressTargets()]).then(
+            ([loaded, targets]) => {
+                if (!isCurrent()) return;
+                setError(null);
+                setAccounts(loaded);
+                setEgressTargets(targets);
+                setSavedPriorities(
+                    Object.fromEntries(loaded.map((account) => [account.id, account.priority])),
+                );
+                setLoading(false);
+            },
+            (err: unknown) => {
+                if (!isCurrent()) return;
+                setError(err instanceof Error ? err.message : "Failed to load accounts.");
+                setLoading(false);
+            },
+        );
     }, []);
 
     const applyAccount = useCallback((updated: Account) => {
@@ -308,7 +311,7 @@ export default function AccountsPage() {
 
     useEffect(() => {
         const refresh = () => {
-            if (document.visibilityState === "visible") void load(true);
+            if (document.visibilityState === "visible") void load();
         };
         const timer = window.setInterval(refresh, 15_000);
         document.addEventListener("visibilitychange", refresh);
@@ -408,7 +411,7 @@ export default function AccountsPage() {
             setSavedPriorities(
                 Object.fromEntries(accounts.map((account) => [account.id, account.priority])),
             );
-            void load(true);
+            void load();
         } catch (err) {
             setError(err instanceof Error ? err.message : "Could not save priority order.");
         } finally {
@@ -421,7 +424,7 @@ export default function AccountsPage() {
         setBusyId(id);
         try {
             applyAccount(await fn());
-            void load(true);
+            void load();
         } catch (err) {
             setError(err instanceof ApiError ? err.message : "Action failed. Please retry.");
         } finally {
@@ -439,7 +442,7 @@ export default function AccountsPage() {
                     current?.filter((account) => account.id !== deleteTarget.id) ?? current,
             );
             setDeleteTarget(null);
-            void load(true);
+            void load();
         } catch (err) {
             setError(err instanceof Error ? err.message : "Delete failed.");
         } finally {
@@ -451,9 +454,7 @@ export default function AccountsPage() {
         <div className="space-y-6">
             <header>
                 <div>
-                    <h1 className="text-fog-100 font-serif text-2xl font-semibold tracking-tight">
-                        Accounts
-                    </h1>
+                    <h1 className="text-fog-100 text-2xl font-semibold tracking-tight">Accounts</h1>
                     <p className="text-fog-400 mt-0.5 max-w-2xl text-sm">
                         Pooled Claude subscriptions. Drag an account between priority lanes to
                         change its priority; accounts within a lane stay in deterministic rotation
@@ -486,7 +487,7 @@ export default function AccountsPage() {
                         }}
                         label="Filter accounts"
                     />
-                    <Button variant="ghost" onClick={() => void load(true)}>
+                    <Button variant="ghost" onClick={() => void load()}>
                         Refresh
                     </Button>
                     <Button
@@ -541,7 +542,14 @@ export default function AccountsPage() {
                 </Card>
             ) : error && !accounts ? (
                 <Card>
-                    <ErrorState message={error} onRetry={() => void load()} />
+                    <ErrorState
+                        message={error}
+                        onRetry={() => {
+                            setLoading(true);
+                            setError(null);
+                            void load();
+                        }}
+                    />
                 </Card>
             ) : accounts && accounts.length > 0 && visibleAccounts.length === 0 ? (
                 <Card>
@@ -577,7 +585,7 @@ export default function AccountsPage() {
                                     <div>
                                         <h2
                                             id={`priority-${priority}`}
-                                            className="text-fog-100 text-sm font-semibold tracking-[0.18em] uppercase"
+                                            className="text-fog-100 text-sm font-semibold"
                                         >
                                             Priority {priority}
                                         </h2>
@@ -777,7 +785,7 @@ export default function AccountsPage() {
                                                                                             <dt className="text-fog-500">
                                                                                                 Failures
                                                                                             </dt>
-                                                                                            <dd className="text-fog-200 mt-0.5 font-mono tabular-nums">
+                                                                                            <dd className="text-fog-200 mt-0.5 tabular-nums">
                                                                                                 {
                                                                                                     acc.provider_health_failure_count
                                                                                                 }
@@ -857,7 +865,7 @@ export default function AccountsPage() {
 
                                                                 <div className="border-ink-700 bg-ink-900/45 mt-4 grid grid-cols-2 gap-px overflow-hidden rounded-lg border">
                                                                     <div className="bg-ink-950/40 px-3 py-2.5">
-                                                                        <div className="text-fog-100 font-mono text-sm font-semibold tabular-nums">
+                                                                        <div className="text-fog-100 text-sm font-semibold tabular-nums">
                                                                             {formatUsd(
                                                                                 acc.total_spend_usd,
                                                                             )}
@@ -867,7 +875,7 @@ export default function AccountsPage() {
                                                                         </div>
                                                                     </div>
                                                                     <div className="bg-ink-950/40 px-3 py-2.5">
-                                                                        <div className="text-fog-100 font-mono text-sm font-semibold tabular-nums">
+                                                                        <div className="text-fog-100 text-sm font-semibold tabular-nums">
                                                                             {formatUsd(
                                                                                 acc.monthly_spend_usd,
                                                                             )}
@@ -1077,7 +1085,7 @@ export default function AccountsPage() {
                     onSaved={(updated) => {
                         setEditTarget(null);
                         applyAccount(updated);
-                        void load(true);
+                        void load();
                     }}
                 />
             ) : null}
@@ -1090,7 +1098,7 @@ export default function AccountsPage() {
                     onDone={(updated) => {
                         setReauthTarget(null);
                         applyAccount(updated);
-                        void load(true);
+                        void load();
                     }}
                 />
             ) : null}
@@ -1114,7 +1122,7 @@ export default function AccountsPage() {
                     onDone={(updated) => {
                         setShowAdd(false);
                         applyAccount(updated);
-                        void load(true);
+                        void load();
                     }}
                 />
             ) : null}
@@ -1336,19 +1344,21 @@ function AddAccountModal({
     const [completing, setCompleting] = useState(false);
     const [completeError, setCompleteError] = useState<string | null>(null);
 
-    const start = useCallback(async () => {
-        setStarting(true);
-        setStartError(null);
-        try {
-            const res = await api.oauthStart();
-            setAuthorizeUrl(res.authorize_url);
-            setVerifier(res.verifier);
-        } catch (err) {
-            setStartError(err instanceof Error ? err.message : "Failed to start OAuth.");
-        } finally {
-            setStarting(false);
-        }
-    }, []);
+    const start = useCallback(
+        () =>
+            api.oauthStart().then(
+                (res) => {
+                    setAuthorizeUrl(res.authorize_url);
+                    setVerifier(res.verifier);
+                    setStarting(false);
+                },
+                (err: unknown) => {
+                    setStartError(err instanceof Error ? err.message : "Failed to start OAuth.");
+                    setStarting(false);
+                },
+            ),
+        [],
+    );
 
     useEffect(() => {
         void start();
@@ -1372,7 +1382,14 @@ function AddAccountModal({
             {starting ? (
                 <LoadingState label="Starting authorization…" />
             ) : startError ? (
-                <ErrorState message={startError} onRetry={() => void start()} />
+                <ErrorState
+                    message={startError}
+                    onRetry={() => {
+                        setStarting(true);
+                        setStartError(null);
+                        void start();
+                    }}
+                />
             ) : (
                 <form onSubmit={complete} className="space-y-5">
                     {/* Step 1 */}
@@ -1479,19 +1496,21 @@ function ReauthAccountModal({
     const [completing, setCompleting] = useState(false);
     const [completeError, setCompleteError] = useState<string | null>(null);
 
-    const start = useCallback(async () => {
-        setStarting(true);
-        setStartError(null);
-        try {
-            const res = await api.oauthStart();
-            setAuthorizeUrl(res.authorize_url);
-            setVerifier(res.verifier);
-        } catch (err) {
-            setStartError(err instanceof Error ? err.message : "Failed to start OAuth.");
-        } finally {
-            setStarting(false);
-        }
-    }, []);
+    const start = useCallback(
+        () =>
+            api.oauthStart().then(
+                (res) => {
+                    setAuthorizeUrl(res.authorize_url);
+                    setVerifier(res.verifier);
+                    setStarting(false);
+                },
+                (err: unknown) => {
+                    setStartError(err instanceof Error ? err.message : "Failed to start OAuth.");
+                    setStarting(false);
+                },
+            ),
+        [],
+    );
 
     useEffect(() => {
         void start();
@@ -1518,7 +1537,14 @@ function ReauthAccountModal({
             {starting ? (
                 <LoadingState label="Starting authorization…" />
             ) : startError ? (
-                <ErrorState message={startError} onRetry={() => void start()} />
+                <ErrorState
+                    message={startError}
+                    onRetry={() => {
+                        setStarting(true);
+                        setStartError(null);
+                        void start();
+                    }}
+                />
             ) : (
                 <form onSubmit={complete} className="space-y-5">
                     {/* Step 1 */}

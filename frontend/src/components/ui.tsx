@@ -40,7 +40,7 @@ export function Button({
 } & React.ButtonHTMLAttributes<HTMLButtonElement>) {
     return (
         <button
-            className={`inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${BUTTON_STYLES[variant]} ${className}`}
+            className={`inline-flex min-h-9 items-center justify-center gap-1.5 rounded-md px-3.5 py-1.5 text-sm font-medium whitespace-nowrap transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${BUTTON_STYLES[variant]} ${className}`}
             {...props}
         >
             {children}
@@ -157,11 +157,11 @@ export function Pagination({
     disabled?: boolean;
 }) {
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
-    const [draftPage, setDraftPage] = useState(String(page));
-
-    useEffect(() => {
-        setDraftPage(String(page));
-    }, [page]);
+    // The typed page number is a draft tied to the page it was typed on; when the
+    // page changes from outside (Previous/Next, filters) the input follows it.
+    const [draft, setDraft] = useState({ page, text: String(page) });
+    const draftPage = draft.page === page ? draft.text : String(page);
+    const setDraftPage = (text: string) => setDraft({ page, text });
 
     const goToPage = () => {
         const parsed = Number(draftPage);
@@ -217,7 +217,7 @@ export function Pagination({
                         }
                     }}
                     aria-label="Current page"
-                    className="border-ink-600 bg-ink-900 text-fog-100 focus:border-brand-400 focus:ring-brand-500/25 h-9 w-14 rounded-md border px-2 text-center font-mono text-sm tabular-nums transition-colors outline-none focus:ring-2"
+                    className="border-ink-600 bg-ink-900 text-fog-100 focus:border-brand-400 focus:ring-brand-500/25 h-9 w-14 rounded-md border px-2 text-center text-sm tabular-nums transition-colors outline-none focus:ring-2"
                 />
                 <span>of {totalPages}</span>
             </label>
@@ -253,7 +253,7 @@ export function StatCard({ label, value, hint }: { label: string; value: string;
         <Card className="p-5">
             <div className="text-fog-400 text-xs font-medium tracking-wider uppercase">{label}</div>
 
-            <div className="text-fog-100 mt-2.5 font-mono text-[1.7rem] leading-none font-semibold tabular-nums">
+            <div className="text-fog-100 mt-2.5 text-[1.7rem] leading-none font-semibold tabular-nums">
                 {value}
             </div>
 
@@ -299,7 +299,7 @@ export function UsageBar({ label, fraction }: { label: string; fraction: number 
         <div className="w-full">
             <div className="mb-1 flex items-center justify-between text-xs">
                 <span className="text-fog-400">{label}</span>
-                <span className="text-fog-300 font-mono tabular-nums">
+                <span className="text-fog-300 tabular-nums">
                     {pct === null ? "unknown" : `${Math.round(pct * 100)}%`}
                 </span>
             </div>

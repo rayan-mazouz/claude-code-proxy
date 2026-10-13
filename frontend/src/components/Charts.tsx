@@ -76,7 +76,7 @@ function ChartTooltip({
             <div className="text-fog-400 text-[11px]">{datum.label}</div>
             <div className="mt-0.5 flex items-center gap-1.5">
                 <span className="h-2 w-2 rounded-full" style={{ backgroundColor: color }} />
-                <span className="text-fog-100 font-mono text-sm font-semibold tabular-nums">
+                <span className="text-fog-100 text-sm font-semibold tabular-nums">
                     {format(datum.value)}
                 </span>
             </div>
@@ -205,7 +205,7 @@ function DualAreaTooltip({
                             style={{ backgroundColor: TONE_COLOR[s.tone] }}
                         />
                         <span className="text-fog-300 text-[11px]">{s.label}</span>
-                        <span className="text-fog-100 ml-auto font-mono text-[11px] font-semibold tabular-nums">
+                        <span className="text-fog-100 ml-auto text-[11px] font-semibold tabular-nums">
                             {s.format(Number(row[s.key]) || 0)}
                         </span>
                     </div>
@@ -353,7 +353,7 @@ function StackedTooltip({
     return (
         <div className="border-ink-600 bg-ink-900/95 rounded-md border px-3 py-2 shadow-[var(--shadow-pop)] backdrop-blur-sm">
             <div className="text-fog-400 text-[11px]">{row.label}</div>
-            <div className="text-fog-100 mt-0.5 font-mono text-sm font-semibold tabular-nums">
+            <div className="text-fog-100 mt-0.5 text-sm font-semibold tabular-nums">
                 {format(total)}
             </div>
             <div className="mt-1.5 space-y-0.5">
@@ -366,7 +366,7 @@ function StackedTooltip({
                                 style={{ backgroundColor: s.color }}
                             />
                             <span className="text-fog-300 text-[11px]">{s.label}</span>
-                            <span className="text-fog-100 ml-auto font-mono text-[11px] tabular-nums">
+                            <span className="text-fog-100 ml-auto text-[11px] tabular-nums">
                                 {format(Number(row[s.key]) || 0)}
                             </span>
                         </div>
@@ -461,7 +461,7 @@ export function RankedBars({
                 <li key={i} className="group">
                     <div className="mb-1 flex items-baseline justify-between gap-3">
                         <span className="text-fog-200 flex min-w-0 items-center gap-2 text-sm">
-                            <span className="text-fog-400 w-4 shrink-0 text-right font-mono text-xs tabular-nums">
+                            <span className="text-fog-400 w-4 shrink-0 text-right text-xs tabular-nums">
                                 {i + 1}
                             </span>
                             <span className="truncate">{d.label}</span>
@@ -471,7 +471,7 @@ export function RankedBars({
                                 </span>
                             ) : null}
                         </span>
-                        <span className="text-fog-100 shrink-0 font-mono text-sm tabular-nums">
+                        <span className="text-fog-100 shrink-0 text-sm tabular-nums">
                             {format(d.value)}
                         </span>
                     </div>
@@ -517,7 +517,7 @@ export function ChartCard({
                 </div>
                 <div className="flex shrink-0 items-center gap-3">
                     {total ? (
-                        <div className="text-fog-100 font-mono text-sm font-semibold tabular-nums">
+                        <div className="text-fog-100 text-sm font-semibold tabular-nums">
                             {total}
                         </div>
                     ) : null}

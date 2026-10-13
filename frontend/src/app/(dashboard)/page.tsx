@@ -10,13 +10,11 @@
 // Auto-refresh and the range selection both re-fetch every panel.
 // ---------------------------------------------------------------------------
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Cpu } from "lucide-react";
 import { api } from "@/lib/api";
 import {
-    ActivityResponse,
-    ByUserResponse,
     DistributionResponse,
     HourlyResponse,
     ModelMixResponse,
@@ -54,7 +52,9 @@ import {
     StackedBarChart,
     StackSeries,
 } from "@/components/Charts";
-import { RangePicker } from "@/components/RangePicker";
+import { RangePicker, resolveRange } from "@/components/RangePicker";
+import { useResource } from "@/lib/useResource";
+import { useStoredState } from "@/lib/useStoredState";
 import { UserFilter } from "@/components/UserFilter";
 import { EventTypeFilter } from "@/components/EventTypeFilter";
 
@@ -98,26 +98,12 @@ export default function OverviewPage() {
             model: params.get("model") || "",
         };
     }, [queryString]);
-    const [queryHydrated, setQueryHydrated] = useState(false);
-    const [range, setRange] = useState<TimeRange>(thisMonth);
-
-    const [stats, setStats] = useState<OverviewStats | null>(null);
-    const [activity, setActivity] = useState<ActivityResponse | null>(null);
-    const [hourly, setHourly] = useState<HourlyResponse | null>(null);
-    const [byUser, setByUser] = useState<ByUserResponse | null>(null);
-    const [distro, setDistro] = useState<DistributionResponse | null>(null);
-    const [modelMix, setModelMix] = useState<ModelMixResponse | null>(null);
-    const [thinkingLevelMix, setThinkingLevelMix] = useState<ThinkingLevelMixResponse | null>(null);
-    const [analyticsError, setAnalyticsError] = useState<string | null>(null);
-    const [analyticsLoading, setAnalyticsLoading] = useState(true);
-    const [refreshing, setRefreshing] = useState(false);
-    const analyticsRequestId = useRef(0);
-
-    // --- user filter ------------------------------------------------------------
-    const [allUsers, setAllUsers] = useState<UserLookup[]>([]);
-    const [filterUserId, setFilterUserId] = useState<string | null>(null);
-    const [modelOptions, setModelOptions] = useState<string[]>([]);
-    const [filterModel, setFilterModel] = useState("");
+    // The URL is the single source of truth for the filters, so links and the
+    // back button restore exactly what was on screen.
+    const range = query.range;
+    const filterUserId = query.userId;
+    const filterModel = query.model;
+    const [offset, setOffset] = useState(0);
 
     const updateUrl = useCallback(
         (updates: Record<string, string | null | undefined>) => {
@@ -134,147 +120,88 @@ export default function OverviewPage() {
         [pathname, queryString, router],
     );
 
-    useEffect(() => {
-        setRange(query.range);
-        setFilterUserId(query.userId);
-        setFilterModel(query.model);
-        setQueryHydrated(true);
-    }, [query]);
+    // --- filter options ---------------------------------------------------------
+    const userOptions = useResource(() => api.analyticsUsers(), "users");
+    const modelLookup = useResource(() => api.analyticsModels(), "models");
+    const allUsers: UserLookup[] = userOptions.data ?? [];
+    const modelOptions: string[] = modelLookup.data ?? [];
 
-    useEffect(() => {
-        api.analyticsUsers()
-            .then(setAllUsers)
-            .catch(() => {});
-        api.analyticsModels()
-            .then(setModelOptions)
-            .catch(() => {});
-    }, []);
-
-    const loadAnalytics = useCallback(async (r: TimeRange, uid?: string | null, model?: string) => {
-        const requestId = ++analyticsRequestId.current;
-        setAnalyticsLoading(true);
-        setAnalyticsError(null);
-        setDistro(null);
-        setModelMix(null);
-        setThinkingLevelMix(null);
-        const u = uid ?? undefined;
-        try {
-            const [s, a, h, bu] = await Promise.all([
-                api.overview(r, u, model),
-                api.activity(r, u, model),
-                api.hourly(r, u, model),
-                api.byUser(r, u, model),
-            ]);
-            if (requestId !== analyticsRequestId.current) return;
-            setStats(s);
-            setActivity(a);
-            setHourly(h);
-            setByUser(bu);
-            const [d, m, t] = await Promise.all([
-                api.distributions(r, u, model).catch(() => null),
-                api.modelMix(r, u, model).catch(() => null),
-                api.thinkingLevelMix(r, u, model).catch(() => null),
-            ]);
-            if (requestId !== analyticsRequestId.current) return;
-            if (d) setDistro(d);
-            if (m) setModelMix(m);
-            if (t) setThinkingLevelMix(t);
-        } catch (err) {
-            if (requestId === analyticsRequestId.current) {
-                setAnalyticsError(err instanceof Error ? err.message : "Failed to load analytics.");
-            }
-        } finally {
-            if (requestId === analyticsRequestId.current) setAnalyticsLoading(false);
-        }
-    }, []);
+    // --- analytics ----------------------------------------------------------------
+    const filterKey = JSON.stringify([
+        range.start ?? null,
+        range.end ?? null,
+        range.label,
+        filterUserId,
+        filterModel,
+    ]);
+    // Headline panels load first; the slower breakdowns fill in independently.
+    const primary = useResource(() => {
+        const r = resolveRange(range);
+        const u = filterUserId ?? undefined;
+        const model = filterModel || undefined;
+        return Promise.all([
+            api.overview(r, u, model),
+            api.activity(r, u, model),
+            api.hourly(r, u, model),
+            api.byUser(r, u, model),
+        ]);
+    }, filterKey);
+    const secondary = useResource(() => {
+        const r = resolveRange(range);
+        const u = filterUserId ?? undefined;
+        const model = filterModel || undefined;
+        return Promise.all([
+            api.distributions(r, u, model).catch(() => null),
+            api.modelMix(r, u, model).catch(() => null),
+            api.thinkingLevelMix(r, u, model).catch(() => null),
+        ]);
+    }, filterKey);
+    const [stats, activity, hourly, byUser] = primary.data ?? [null, null, null, null];
+    const [distro, modelMix, thinkingLevelMix] = secondary.data ?? [null, null, null];
+    const analyticsError = primary.error;
+    const analyticsLoading = primary.loading;
 
     // --- usage table ---------------------------------------------------------
-    const [offset, setOffset] = useState(0);
-    const [usage, setUsage] = useState<UsagePage | null>(null);
-    const [usageError, setUsageError] = useState<string | null>(null);
-    const [usageLoading, setUsageLoading] = useState(true);
-    const usageRequestId = useRef(0);
-
-    const loadUsage = useCallback(
-        async (off: number, r: TimeRange, uid?: string | null, model?: string) => {
-            const requestId = ++usageRequestId.current;
-            setUsageLoading(true);
-            setUsageError(null);
-            try {
-                const nextUsage = await api.usage(PAGE_SIZE, off, r, uid ?? undefined, model);
-                if (requestId === usageRequestId.current) setUsage(nextUsage);
-            } catch (err) {
-                if (requestId === usageRequestId.current) {
-                    setUsageError(err instanceof Error ? err.message : "Failed to load usage.");
-                }
-            } finally {
-                if (requestId === usageRequestId.current) setUsageLoading(false);
-            }
-        },
-        [],
+    const usageResource = useResource(
+        () =>
+            api.usage(
+                PAGE_SIZE,
+                offset,
+                resolveRange(range),
+                filterUserId ?? undefined,
+                filterModel || undefined,
+            ),
+        JSON.stringify([filterKey, offset]),
     );
+    const usage: UsagePage | null = usageResource.data ?? null;
+    const usageError = usageResource.error;
+    const usageLoading = usageResource.loading;
 
-    const refreshAll = useCallback(async () => {
-        setRefreshing(true);
-        try {
-            await Promise.all([
-                loadAnalytics(range, filterUserId, filterModel || undefined),
-                loadUsage(0, range, filterUserId, filterModel || undefined),
-            ]);
-            setOffset(0);
-        } finally {
-            setRefreshing(false);
-        }
-    }, [filterModel, filterUserId, loadAnalytics, loadUsage, range]);
-
-    // Reset to the first page and reload everything when the range or user filter changes.
-    useEffect(() => {
-        if (!queryHydrated) return;
-        setOffset(0);
-        void loadAnalytics(range, filterUserId, filterModel || undefined);
-    }, [range, filterModel, filterUserId, loadAnalytics, queryHydrated]);
-
-    useEffect(() => {
-        if (!queryHydrated) return;
-        void loadUsage(offset, range, filterUserId, filterModel || undefined);
-    }, [offset, range, filterModel, filterUserId, loadUsage, queryHydrated]);
+    const refreshing = primary.loading || usageResource.loading;
+    const { reload: reloadPrimary } = primary;
+    const { reload: reloadSecondary } = secondary;
+    const { reload: reloadUsage } = usageResource;
+    const refreshAll = useCallback(() => {
+        reloadPrimary();
+        reloadSecondary();
+        reloadUsage();
+    }, [reloadPrimary, reloadSecondary, reloadUsage]);
 
     // --- auto-refresh --------------------------------------------------------
-    const [autoRefresh, setAutoRefresh] = useState(false);
-    const [refreshSecs, setRefreshSecs] = useState(10);
-
-    useEffect(() => {
-        try {
-            if (window.localStorage.getItem(AUTO_REFRESH_KEY) === "1") setAutoRefresh(true);
-            const secs = Number(window.localStorage.getItem(REFRESH_SECS_KEY));
-            if (Number.isFinite(secs) && secs > 0) setRefreshSecs(Math.floor(secs));
-        } catch {
-            // localStorage may be unavailable — fall back to defaults.
-        }
-    }, []);
-
-    useEffect(() => {
-        try {
-            window.localStorage.setItem(AUTO_REFRESH_KEY, autoRefresh ? "1" : "0");
-        } catch {
-            /* ignore */
-        }
-    }, [autoRefresh]);
-
-    useEffect(() => {
-        try {
-            window.localStorage.setItem(REFRESH_SECS_KEY, String(refreshSecs));
-        } catch {
-            /* ignore */
-        }
-    }, [refreshSecs]);
+    const [autoRefresh, setAutoRefresh] = useStoredState(
+        AUTO_REFRESH_KEY,
+        false,
+        (raw) => raw === "1",
+        (on) => (on ? "1" : "0"),
+    );
+    const [refreshSecs, setRefreshSecs] = useStoredState(REFRESH_SECS_KEY, 10, (raw) => {
+        const secs = Number(raw);
+        return Number.isFinite(secs) && secs > 0 ? Math.floor(secs) : undefined;
+    });
 
     useEffect(() => {
         if (!autoRefresh) return;
-        const ms = Math.max(1, refreshSecs) * 1000;
-        const id = setInterval(() => {
-            void refreshAll();
-        }, ms);
+        const id = setInterval(refreshAll, Math.max(1, refreshSecs) * 1000);
         return () => clearInterval(id);
     }, [autoRefresh, refreshSecs, refreshAll]);
 
@@ -388,9 +315,7 @@ export default function OverviewPage() {
             {/* Header */}
             <header className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                    <h1 className="text-fog-100 font-serif text-2xl font-semibold tracking-tight">
-                        Overview
-                    </h1>
+                    <h1 className="text-fog-100 text-2xl font-semibold tracking-tight">Overview</h1>
                     <p className="text-fog-400 mt-0.5 text-sm">
                         What your subscription pool delivered, and how it&apos;s being used.
                     </p>
@@ -405,7 +330,7 @@ export default function OverviewPage() {
                     <div className="border-ink-700 bg-ink-900 flex h-9 items-center gap-2 rounded-lg border px-3">
                         <StatusToggle
                             on={autoRefresh}
-                            onClick={() => setAutoRefresh((v) => !v)}
+                            onClick={() => setAutoRefresh(!autoRefresh)}
                             onLabel="Auto"
                             offLabel="Auto"
                             srLabel={autoRefresh ? "Disable auto-refresh" : "Enable auto-refresh"}
@@ -429,7 +354,7 @@ export default function OverviewPage() {
                     <Button
                         variant="ghost"
                         className="h-9"
-                        onClick={() => void refreshAll()}
+                        onClick={refreshAll}
                         disabled={refreshing}
                     >
                         {refreshing ? "Refreshing…" : "Refresh"}
@@ -437,7 +362,6 @@ export default function OverviewPage() {
                     <RangePicker
                         value={range}
                         onChange={(next) => {
-                            setRange(next);
                             setOffset(0);
                             updateUrl({
                                 start: next.start,
@@ -451,7 +375,6 @@ export default function OverviewPage() {
                         users={allUsers}
                         value={filterUserId}
                         onChange={(next) => {
-                            setFilterUserId(next);
                             setOffset(0);
                             updateUrl({ user: next, page: "1" });
                         }}
@@ -460,7 +383,6 @@ export default function OverviewPage() {
                         value={filterModel}
                         options={modelOptions}
                         onChange={(next) => {
-                            setFilterModel(next);
                             setOffset(0);
                             updateUrl({ model: next, page: "1" });
                         }}
@@ -479,12 +401,7 @@ export default function OverviewPage() {
                 </Card>
             ) : analyticsError && !stats ? (
                 <Card>
-                    <ErrorState
-                        message={analyticsError}
-                        onRetry={() =>
-                            void loadAnalytics(range, filterUserId, filterModel || undefined)
-                        }
-                    />
+                    <ErrorState message={analyticsError} onRetry={refreshAll} />
                 </Card>
             ) : stats ? (
                 <>
@@ -495,7 +412,7 @@ export default function OverviewPage() {
                                 {range.label}
                             </div>
                             <div
-                                className="text-fog-100 mt-3.5 font-serif text-6xl leading-none font-semibold tracking-tight"
+                                className="text-fog-100 mt-3 text-5xl leading-none font-semibold tracking-tight tabular-nums"
                                 style={{ fontVariantNumeric: "oldstyle-nums tabular-nums" }}
                             >
                                 {formatUsd0(stats.api_equivalent_cost_usd)}
@@ -505,7 +422,7 @@ export default function OverviewPage() {
                             </div>
                             <div className="mt-4 flex gap-6">
                                 <div>
-                                    <div className="text-fog-100 font-mono text-lg tabular-nums">
+                                    <div className="text-fog-100 text-lg tabular-nums">
                                         {formatTokens(stats.tokens)}
                                     </div>
                                     <div className="text-fog-400 mt-1 text-[10px] tracking-wider uppercase">
@@ -513,7 +430,7 @@ export default function OverviewPage() {
                                     </div>
                                 </div>
                                 <div>
-                                    <div className="text-fog-100 font-mono text-lg tabular-nums">
+                                    <div className="text-fog-100 text-lg tabular-nums">
                                         {formatNumber(stats.requests)}
                                     </div>
                                     <div className="text-fog-400 mt-1 text-[10px] tracking-wider uppercase">
@@ -521,7 +438,7 @@ export default function OverviewPage() {
                                     </div>
                                 </div>
                             </div>
-                            <p className="border-brand-500/55 text-fog-400 mt-auto border-l-2 pt-4 pl-3 font-serif text-xs italic">
+                            <p className="border-brand-500/55 text-fog-400 mt-auto border-l-2 pt-4 pl-3 text-xs">
                                 Flat-rate subscriptions, measured at list API prices — value
                                 delivered, not money owed.
                             </p>
@@ -616,14 +533,7 @@ export default function OverviewPage() {
                         ) : usageError ? (
                             <ErrorState
                                 message={usageError ?? "Unable to load request history."}
-                                onRetry={() =>
-                                    void loadUsage(
-                                        offset,
-                                        range,
-                                        filterUserId,
-                                        filterModel || undefined,
-                                    )
-                                }
+                                onRetry={reloadUsage}
                             />
                         ) : usage && usage!.items.length > 0 ? (
                             <div className="max-h-[520px] overflow-auto overscroll-contain">
@@ -691,24 +601,24 @@ export default function OverviewPage() {
                                                         ? `${r.fallback_provider_label} · API fallback`
                                                         : (r.account_label ?? "—")}
                                                 </td>
-                                                <td className="px-4 py-2.5 text-right font-mono tabular-nums">
+                                                <td className="px-4 py-2.5 text-right tabular-nums">
                                                     <TokenCell value={r.input_tokens} />
                                                 </td>
-                                                <td className="px-4 py-2.5 text-right font-mono tabular-nums">
+                                                <td className="px-4 py-2.5 text-right tabular-nums">
                                                     <TokenCell value={r.output_tokens} />
                                                 </td>
-                                                <td className="px-4 py-2.5 text-right font-mono tabular-nums">
+                                                <td className="px-4 py-2.5 text-right tabular-nums">
                                                     <TokenCell
                                                         value={r.cache_creation_input_tokens}
                                                     />
                                                 </td>
-                                                <td className="px-4 py-2.5 text-right font-mono tabular-nums">
+                                                <td className="px-4 py-2.5 text-right tabular-nums">
                                                     <TokenCell value={r.cache_read_input_tokens} />
                                                 </td>
                                                 <td className="px-4 py-2.5 text-center">
                                                     <CacheTtlCell ttl={r.cache_ttl} />
                                                 </td>
-                                                <td className="px-4 py-2.5 text-right font-mono tabular-nums">
+                                                <td className="px-4 py-2.5 text-right tabular-nums">
                                                     <CostCell value={r.cost_usd} />
                                                 </td>
                                                 <td className="px-4 py-2.5 text-right">
@@ -757,7 +667,7 @@ export default function OverviewPage() {
                                                   );
                                                   setOffset((p - 1) * PAGE_SIZE);
                                               }}
-                                              className="border-ink-600 bg-ink-800 text-fog-100 w-12 rounded border px-1.5 py-0.5 text-center font-mono text-xs tabular-nums"
+                                              className="border-ink-600 bg-ink-800 text-fog-100 w-12 rounded border px-1.5 py-0.5 text-center text-xs tabular-nums"
                                           />
                                           <span>of {totalPages}</span>
                                       </span>
@@ -797,13 +707,13 @@ function SystemTokenFlow({ stats, rangeLabel }: { stats: OverviewStats; rangeLab
                 </div>
                 <div className="mt-4 grid grid-cols-2 gap-4">
                     <div>
-                        <div className="text-fog-100 font-mono text-4xl font-semibold tabular-nums">
+                        <div className="text-fog-100 text-4xl font-semibold tabular-nums">
                             {inputRate.toFixed(2)}%
                         </div>
                         <div className="text-fog-400 mt-1 text-xs">of traffic is input</div>
                     </div>
                     <div>
-                        <div className="text-fog-100 font-mono text-4xl font-semibold tabular-nums">
+                        <div className="text-fog-100 text-4xl font-semibold tabular-nums">
                             {outputRate.toFixed(2)}%
                         </div>
                         <div className="text-fog-400 mt-1 text-xs">of traffic is output</div>
@@ -823,7 +733,7 @@ function SystemTokenFlow({ stats, rangeLabel }: { stats: OverviewStats; rangeLab
                         style={{ width: `${outputRate}%` }}
                     />
                 </div>
-                <div className="mt-3 grid grid-cols-2 gap-3 font-mono text-xs tabular-nums">
+                <div className="mt-3 grid grid-cols-2 gap-3 text-xs tabular-nums">
                     <span className="text-fog-300">
                         <i className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-[var(--color-chart-1)]" />
                         {formatTokens(stats.input_tokens)} input
@@ -840,7 +750,7 @@ function SystemTokenFlow({ stats, rangeLabel }: { stats: OverviewStats; rangeLab
                     Input cache hit rate
                 </div>
                 <div className="mt-4 flex items-baseline justify-between gap-4">
-                    <div className="text-fog-100 font-mono text-4xl font-semibold tabular-nums">
+                    <div className="text-fog-100 text-4xl font-semibold tabular-nums">
                         {cacheHitRate.toFixed(1)}%
                     </div>
                     <div className="text-fog-400 text-right text-xs">
@@ -908,7 +818,7 @@ function QuotaAverageCell({
             <div className="text-fog-400 text-[11px] font-medium tracking-wider uppercase">
                 {label}
             </div>
-            <div className="text-fog-100 mt-4 font-mono text-4xl font-semibold tabular-nums">
+            <div className="text-fog-100 mt-4 text-4xl font-semibold tabular-nums">
                 {percentage.toFixed(1)}%
             </div>
             <div className="text-fog-400 mt-1 text-xs">average used</div>
@@ -1131,7 +1041,7 @@ function UserInsightsCard({
                                     <div className="text-fog-100 truncate text-sm font-semibold">
                                         {user.user_name ?? "—"}
                                     </div>
-                                    <div className="text-fog-500 mt-0.5 font-mono text-[10px] tabular-nums">
+                                    <div className="text-fog-500 mt-0.5 text-[10px] tabular-nums">
                                         {formatNumber(user.total_requests)} requests
                                     </div>
                                 </div>
@@ -1163,7 +1073,7 @@ function UserInsightsCard({
                                 )}
 
                                 <div className="text-left sm:text-right">
-                                    <div className="text-fog-100 font-mono text-sm tabular-nums">
+                                    <div className="text-fog-100 text-sm tabular-nums">
                                         {view === "tokens"
                                             ? formatTokens(totalTokens)
                                             : formatNumber(user.total_requests)}
@@ -1238,7 +1148,7 @@ function UserInsightLegend({
                     />
                     {item.label}
                     {item.meta ? (
-                        <span className="text-fog-500 font-mono tabular-nums">{item.meta}</span>
+                        <span className="text-fog-500 tabular-nums">{item.meta}</span>
                     ) : null}
                 </span>
             ))}
@@ -1335,10 +1245,10 @@ function RequestsByModelCard({ data }: { data: ModelMixResponse }) {
                                     }}
                                 />
                             </div>
-                            <span className="text-fog-200 w-16 text-right font-mono text-xs tabular-nums">
+                            <span className="text-fog-200 w-16 text-right text-xs tabular-nums">
                                 {formatNumber(v.requests)}
                             </span>
-                            <span className="text-fog-400 w-8 text-right font-mono text-[11px] tabular-nums">
+                            <span className="text-fog-400 w-8 text-right text-[11px] tabular-nums">
                                 {pct}%
                             </span>
                         </div>
@@ -1361,11 +1271,16 @@ function AverageTpsByModelCard({ data }: { data: ModelMixResponse }) {
         }
     }
     const rows = Object.entries(byModel)
-        .map(([model, value]) => ({ model, tps: value.measuredRequests ? value.tps / value.measuredRequests : null }))
+        .map(([model, value]) => ({
+            model,
+            tps: value.measuredRequests ? value.tps / value.measuredRequests : null,
+        }))
         .filter((row) => row.tps != null)
         .sort((a, b) => (b.tps ?? 0) - (a.tps ?? 0));
     const maxTps = rows[0]?.tps ?? 1;
-    const allModels = Array.from(new Set(data.users.flatMap((user) => user.models.map((model) => model.model))));
+    const allModels = Array.from(
+        new Set(data.users.flatMap((user) => user.models.map((model) => model.model))),
+    );
 
     return (
         <Card className="p-5">
@@ -1392,7 +1307,7 @@ function AverageTpsByModelCard({ data }: { data: ModelMixResponse }) {
                                         }}
                                     />
                                 </div>
-                                <span className="text-fog-200 w-20 text-right font-mono text-xs tabular-nums">
+                                <span className="text-fog-200 w-20 text-right text-xs tabular-nums">
                                     {formatNumber(row.tps ?? 0)} t/s
                                 </span>
                             </div>
@@ -1501,7 +1416,7 @@ function DistributionCard({ distro }: { distro: DistributionResponse }) {
                                     }}
                                 />
                             </div>
-                            <span className="text-fog-200 w-20 text-right font-mono text-xs tabular-nums">
+                            <span className="text-fog-200 w-20 text-right text-xs tabular-nums">
                                 {formatTokens(val)}
                             </span>
                         </div>

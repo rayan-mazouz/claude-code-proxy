@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Check, ChevronRight, KeyRound, ListChecks, Pencil, Search, Trash2 } from "lucide-react";
 import { api, API_BASE_URL, ApiError } from "@/lib/api";
+import { useStoredState } from "@/lib/useStoredState";
 import {
     ApiKey,
     QuotaWindowKey,
@@ -147,7 +148,7 @@ function MonthlyUsage({ user }: { user: User }) {
                 <div>
                     <div className="flex items-baseline justify-between gap-2">
                         <div className="text-fog-200 text-sm font-medium">Tokens this month</div>
-                        <div className="text-fog-100 font-mono text-sm font-semibold tabular-nums">
+                        <div className="text-fog-100 text-sm font-semibold tabular-nums">
                             {formatTokens(used)}
                             {hasBudget ? ` / ${formatTokens(budget)}` : ""}
                         </div>
@@ -169,7 +170,7 @@ function MonthlyUsage({ user }: { user: User }) {
                 <div className="border-ink-700 sm:border-l sm:pl-4">
                     <div className="flex items-baseline justify-between gap-2">
                         <div className="text-fog-200 text-sm font-medium">Spend this month</div>
-                        <div className="text-fog-100 font-mono text-sm font-semibold tabular-nums">
+                        <div className="text-fog-100 text-sm font-semibold tabular-nums">
                             {formatUsd(user.monthly_spend_usd)}
                             {hasSpendBudget
                                 ? ` / ${formatUsd(user.monthly_spend_budget_usd ?? 0)}`
@@ -228,7 +229,7 @@ function QuotaUsage({ user }: { user: User }) {
                         >
                             <div className="flex items-baseline justify-between gap-2">
                                 <div className="text-fog-200 text-sm font-medium">{label}</div>
-                                <div className="text-fog-100 font-mono text-sm font-semibold tabular-nums">
+                                <div className="text-fog-100 text-sm font-semibold tabular-nums">
                                     {share ? `${(share.used_pct * 100).toFixed(1)}%` : "—"}
                                 </div>
                             </div>
@@ -450,7 +451,9 @@ export default function UsersPage() {
     const [selectionMode, setSelectionMode] = useState(false);
     const [bulkPriority, setBulkPriority] = useState("1");
     const [applyingBulkPriority, setApplyingBulkPriority] = useState(false);
-    const [usageView, setUsageView] = useState<UsageView>("cost");
+    const [usageView, setUsageView] = useStoredState<UsageView>(USAGE_VIEW_KEY, "cost", (raw) =>
+        raw === "quota" || raw === "cost" ? raw : undefined,
+    );
 
     const [showCreate, setShowCreate] = useState(false);
     const [editTarget, setEditTarget] = useState<User | null>(null);
@@ -464,48 +467,34 @@ export default function UsersPage() {
         secret: string;
     } | null>(null);
 
-    const load = useCallback(async (background = false) => {
-        if (!background) setLoading(true);
-        if (!background) setError(null);
-        try {
-            const [loaded, loadedPresets, loadedModels] = await Promise.all([
-                api.users(),
-                api.presets(),
-                api.userModelOptions(),
-            ]);
-            setUsers(loaded);
-            setPresets(loadedPresets);
-            setModelOptions(loadedModels);
-            setSavedPriorities(
-                Object.fromEntries(loaded.map((user) => [user.id, user.priority ?? 4])),
-            );
-        } catch (err) {
-            setError(err instanceof Error ? err.message : "Failed to load users.");
-        } finally {
-            if (!background) setLoading(false);
-        }
-    }, []);
+    // State only changes once the request settles; the initial state already shows
+    // the spinner and the retry button resets it explicitly.
+    const load = useCallback(
+        () =>
+            Promise.all([api.users(), api.presets(), api.userModelOptions()]).then(
+                ([loaded, loadedPresets, loadedModels]) => {
+                    setError(null);
+                    setUsers(loaded);
+                    setPresets(loadedPresets);
+                    setModelOptions(loadedModels);
+                    setSavedPriorities(
+                        Object.fromEntries(loaded.map((user) => [user.id, user.priority ?? 4])),
+                    );
+                    setLoading(false);
+                },
+                (err: unknown) => {
+                    setError(err instanceof Error ? err.message : "Failed to load users.");
+                    setLoading(false);
+                },
+            ),
+        [],
+    );
 
     useEffect(() => {
         void load();
     }, [load]);
 
-    useEffect(() => {
-        try {
-            if (window.localStorage.getItem(USAGE_VIEW_KEY) === "quota") setUsageView("quota");
-        } catch {
-            // localStorage may be unavailable — fall back to the cost view.
-        }
-    }, []);
-
-    const changeUsageView = (next: UsageView) => {
-        setUsageView(next);
-        try {
-            window.localStorage.setItem(USAGE_VIEW_KEY, next);
-        } catch {
-            /* ignore */
-        }
-    };
+    const changeUsageView = (next: UsageView) => setUsageView(next);
 
     const normalizedUserSearch = userSearch.trim().toLocaleLowerCase();
     const visibleUsers =
@@ -573,7 +562,7 @@ export default function UsersPage() {
             setSavedPriorities(
                 Object.fromEntries(users.map((user) => [user.id, user.priority ?? 4])),
             );
-            await load(true);
+            await load();
         } catch (err) {
             setError(err instanceof Error ? err.message : "Could not save user priority order.");
         } finally {
@@ -619,9 +608,7 @@ export default function UsersPage() {
         <div className="space-y-6">
             <header className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                    <h1 className="text-fog-100 font-serif text-2xl font-semibold tracking-tight">
-                        Users
-                    </h1>
+                    <h1 className="text-fog-100 text-2xl font-semibold tracking-tight">Users</h1>
                     <p className="text-fog-400 mt-0.5 text-sm">
                         Each user holds one or more API keys. Set per-user rate limits and budgets;
                         usage is tracked per user.
@@ -650,7 +637,7 @@ export default function UsersPage() {
                             onChange={changeUsageView}
                             label="Show usage as"
                         />
-                        <Button variant="ghost" onClick={() => void load(true)}>
+                        <Button variant="ghost" onClick={() => void load()}>
                             Refresh
                         </Button>
                         <Button
@@ -676,11 +663,7 @@ export default function UsersPage() {
                 </div>
             </header>
 
-            <PresetsPanel
-                presets={presets}
-                models={modelOptions}
-                onChanged={() => void load(true)}
-            />
+            <PresetsPanel presets={presets} models={modelOptions} onChanged={() => void load()} />
 
             {selectionMode ? (
                 <BulkPriorityBar
@@ -712,7 +695,14 @@ export default function UsersPage() {
                 </Card>
             ) : error && !users ? (
                 <Card>
-                    <ErrorState message={error} onRetry={() => void load()} />
+                    <ErrorState
+                        message={error}
+                        onRetry={() => {
+                            setLoading(true);
+                            setError(null);
+                            void load();
+                        }}
+                    />
                 </Card>
             ) : users && users.length > 0 && visibleUsers.length === 0 ? (
                 <Card>
@@ -736,7 +726,7 @@ export default function UsersPage() {
                                     <div>
                                         <h2
                                             id={`user-priority-${priority}`}
-                                            className="text-fog-100 text-sm font-semibold tracking-[0.18em] uppercase"
+                                            className="text-fog-100 text-sm font-semibold"
                                         >
                                             Priority {priority}
                                         </h2>
@@ -851,7 +841,7 @@ export default function UsersPage() {
                                                                 {/* Stats row */}
                                                                 <div className="bg-ink-700 mt-4 grid gap-px overflow-hidden rounded-lg sm:grid-cols-2 xl:grid-cols-2">
                                                                     <div className="bg-ink-900 flex-1 px-4 py-3">
-                                                                        <div className="text-fog-100 font-mono text-base font-semibold tracking-tight tabular-nums">
+                                                                        <div className="text-fog-100 text-base font-semibold tracking-tight tabular-nums">
                                                                             {formatTokens(
                                                                                 user.total_tokens,
                                                                             )}
@@ -870,7 +860,7 @@ export default function UsersPage() {
                                                                     </div>
                                                                     {usageView === "quota" ? (
                                                                         <div className="bg-ink-900 flex-1 px-4 py-3">
-                                                                            <div className="text-fog-100 font-mono text-base font-semibold tracking-tight tabular-nums">
+                                                                            <div className="text-fog-100 text-base font-semibold tracking-tight tabular-nums">
                                                                                 {formatTokens(
                                                                                     user.monthly_tokens_used,
                                                                                 )}
@@ -881,7 +871,7 @@ export default function UsersPage() {
                                                                         </div>
                                                                     ) : (
                                                                         <div className="bg-ink-900 flex-1 px-4 py-3">
-                                                                            <div className="text-fog-100 font-mono text-base font-semibold tracking-tight tabular-nums">
+                                                                            <div className="text-fog-100 text-base font-semibold tracking-tight tabular-nums">
                                                                                 {formatUsd(
                                                                                     user.total_spend_usd,
                                                                                 )}
@@ -900,7 +890,7 @@ export default function UsersPage() {
                                                                         </div>
                                                                     )}
                                                                     <div className="bg-ink-900 flex-1 px-4 py-3">
-                                                                        <div className="text-fog-100 font-mono text-base font-semibold tracking-tight tabular-nums">
+                                                                        <div className="text-fog-100 text-base font-semibold tracking-tight tabular-nums">
                                                                             {formatNumber(
                                                                                 user.total_requests,
                                                                             )}
@@ -910,7 +900,7 @@ export default function UsersPage() {
                                                                         </div>
                                                                     </div>
                                                                     <div className="bg-ink-900 flex-1 px-4 py-3">
-                                                                        <div className="text-fog-100 font-mono text-base font-semibold tracking-tight tabular-nums">
+                                                                        <div className="text-fog-100 text-base font-semibold tracking-tight tabular-nums">
                                                                             {formatDateTime(
                                                                                 user.last_used_at,
                                                                             )}
@@ -940,7 +930,7 @@ export default function UsersPage() {
                                                                         className="border-ink-700 text-fog-300 hover:bg-ink-800 hover:text-fog-100 hover:border-ink-600 inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors"
                                                                     >
                                                                         <KeyRound className="h-3.5 w-3.5" />
-                                                                        <span className="font-mono tabular-nums">
+                                                                        <span className="tabular-nums">
                                                                             {user.key_count}
                                                                         </span>{" "}
                                                                         key
@@ -986,7 +976,7 @@ export default function UsersPage() {
                                                                     <KeysPanel
                                                                         user={user}
                                                                         onChanged={() =>
-                                                                            void load(true)
+                                                                            void load()
                                                                         }
                                                                         onRevealed={(
                                                                             label,
@@ -1094,14 +1084,18 @@ function KeysPanel({
     const [editTarget, setEditTarget] = useState<ApiKey | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<ApiKey | null>(null);
 
-    const load = useCallback(async () => {
-        setError(null);
-        try {
-            setKeys(await api.keys(user.id));
-        } catch (err) {
-            setError(err instanceof Error ? err.message : "Failed to load keys.");
-        }
-    }, [user.id]);
+    const load = useCallback(
+        () =>
+            api.keys(user.id).then(
+                (loaded) => {
+                    setError(null);
+                    setKeys(loaded);
+                },
+                (err: unknown) =>
+                    setError(err instanceof Error ? err.message : "Failed to load keys."),
+            ),
+        [user.id],
+    );
 
     useEffect(() => {
         void load();

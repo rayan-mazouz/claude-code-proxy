@@ -25,11 +25,14 @@
     --color-fog-200: #d6d3c9; /* strong secondary */
     --color-fog-300: #aeaaa0; /* secondary */
     --color-fog-400: #9a968c; /* muted / labels */
+    --color-fog-500: #85827a; /* tertiary metadata (small print, placeholders) */
+    --color-fog-700: #55534c; /* decorative strokes only, never text */
 
     /* Claude coral. brand-400 lifts for hovers; brand-300 is the text-on-tint. */
     --color-brand-500: #d97757;
     --color-brand-400: #e2876a;
     --color-brand-300: #eaa78d;
+    --color-brand-200: #f2c3b0; /* text on strong coral tints */
 
     /* Status — readable on dark tints and as solid fills. */
     --color-good-500: #4cb185;
@@ -49,7 +52,6 @@
     --font-sans:
         ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
         sans-serif;
-    --font-serif: ui-serif, Georgia, "Times New Roman", serif;
     --font-mono: ui-monospace, "SFMono-Regular", "Menlo", "Consolas", monospace;
 
     --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.25), 0 1px 3px rgba(0, 0, 0, 0.3);

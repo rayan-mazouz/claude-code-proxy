@@ -62,10 +62,10 @@ export function BrandMark() {
                 <ClaudeLogo className="text-brand-500 h-6 w-6" />
             </div>
             <div className="leading-tight">
-                <div className="text-fog-100 font-serif text-[1.05rem] leading-tight font-semibold tracking-tight">
+                <div className="text-fog-100 text-[0.95rem] leading-tight font-semibold tracking-tight">
                     Claude Code
                 </div>
-                <div className="text-fog-400 text-[11px] font-medium tracking-[0.18em] uppercase">
+                <div className="text-fog-400 text-[11px] font-medium tracking-wide">
                     Proxy Console
                 </div>
             </div>

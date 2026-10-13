@@ -4,7 +4,9 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { ProxyEvent, TimeRange, UserLookup } from "@/lib/types";
-import { RangePicker } from "@/components/RangePicker";
+import { RangePicker, resolveRange } from "@/components/RangePicker";
+import { useResource } from "@/lib/useResource";
+import { useStoredState } from "@/lib/useStoredState";
 import { UserFilter } from "@/components/UserFilter";
 import { EventTypeFilter } from "@/components/EventTypeFilter";
 import { RequestCaptureOverlay } from "@/components/RequestCaptureOverlay";
@@ -175,50 +177,39 @@ export default function EventsPage() {
             } satisfies TimeRange,
         };
     }, [queryString]);
-    const [range, setRange] = useState<TimeRange>(initialRange);
-    const [users, setUsers] = useState<UserLookup[]>([]);
-    const [models, setModels] = useState<string[]>([]);
-    const [userId, setUserId] = useState<string | null>(null);
-    const [eventType, setEventType] = useState("");
-    const [model, setModel] = useState("");
-    const [groupBy, setGroupBy] = useState<GroupBy>("request");
-    const [events, setEvents] = useState<ProxyEvent[]>([]);
+    // Every filter lives in the URL, so the page derives its state from it and
+    // links, reloads and the back button reproduce exactly the same view.
+    const { range, userId, eventType, model, groupBy, pageSize, offset } = query;
     const [expandedRequests, setExpandedRequests] = useState<Set<string>>(new Set());
-    const [total, setTotal] = useState(0);
-    const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-    const [offset, setOffset] = useState(0);
-    const [queryHydrated, setQueryHydrated] = useState(false);
-    const [loading, setLoading] = useState(true);
-    const [refreshing, setRefreshing] = useState(false);
-    const [autoRefresh, setAutoRefresh] = useState(false);
-    const [refreshSecs, setRefreshSecs] = useState(10);
-    const [error, setError] = useState<string | null>(null);
     const [captureEventId, setCaptureEventId] = useState<string | null>(null);
-    const load = useCallback(
-        (pageOffset = offset, selectedEventType = eventType, selectedModel = model) => {
-            setLoading(true);
-            setError(null);
-            return api
-                .events(
-                    pageSize,
-                    pageOffset,
-                    selectedEventType || undefined,
-                    userId || undefined,
-                    range.start,
-                    range.end,
-                    undefined,
-                    selectedModel || undefined,
-                    groupBy === "request" ? "request" : undefined,
-                )
-                .then((page) => {
-                    setEvents(page.events);
-                    setTotal(page.total);
-                })
-                .catch((e) => setError(e instanceof Error ? e.message : "Unable to load events."))
-                .finally(() => setLoading(false));
-        },
-        [eventType, groupBy, model, offset, pageSize, range.end, range.start, userId],
-    );
+
+    const userLookup = useResource(() => api.analyticsUsers(), "users");
+    const modelLookup = useResource(() => api.analyticsModels(), "models");
+    const users: UserLookup[] = userLookup.data ?? [];
+    const models: string[] = modelLookup.data ?? [];
+
+    const eventsResource = useResource(() => {
+        const bounds = resolveRange(range);
+        return api.events(
+            pageSize,
+            offset,
+            eventType || undefined,
+            userId || undefined,
+            bounds.start,
+            bounds.end,
+            undefined,
+            model || undefined,
+            groupBy === "request" ? "request" : undefined,
+        );
+    }, queryString);
+    const events: ProxyEvent[] = eventsResource.data?.events ?? [];
+    const total = eventsResource.data?.total ?? 0;
+    const error = eventsResource.error;
+    // Only blank the table before the first page arrives; refreshes keep rows visible.
+    const loading = eventsResource.loading && eventsResource.data === undefined;
+    const refreshing = eventsResource.loading && eventsResource.data !== undefined;
+    const { reload: refreshEvents } = eventsResource;
+
     const toggleRequest = (requestId: string) => {
         setExpandedRequests((current) => {
             const next = new Set(current);
@@ -241,71 +232,34 @@ export default function EventsPage() {
         },
         [pathname, queryString, router],
     );
-    const refreshEvents = useCallback(async () => {
-        setRefreshing(true);
-        try {
-            await load(0);
-            setOffset(0);
-            updateUrl({ page: "1" });
-        } finally {
-            setRefreshing(false);
-        }
-    }, [load, updateUrl]);
+
+    // When filters shrink the result set below the current page, move to the last page.
     useEffect(() => {
-        api.analyticsUsers()
-            .then(setUsers)
-            .catch(() => {});
-        api.analyticsModels()
-            .then(setModels)
-            .catch(() => {});
-    }, []);
-    useEffect(() => {
-        setRange(query.range);
-        setUserId(query.userId);
-        setEventType(query.eventType);
-        setModel(query.model);
-        setGroupBy(query.groupBy);
-        setPageSize(query.pageSize);
-        setOffset(query.offset);
-        setQueryHydrated(true);
-    }, [query]);
-    useEffect(() => {
-        if (!queryHydrated) return;
-        load(offset);
-    }, [load, offset, queryHydrated]);
-    useEffect(() => {
-        if (!queryHydrated || total <= 0 || offset < total) return;
-        const lastPageOffset = Math.max(0, (Math.ceil(total / pageSize) - 1) * pageSize);
-        setOffset(lastPageOffset);
-        updateUrl({ page: String(Math.floor(lastPageOffset / pageSize) + 1) });
-    }, [offset, pageSize, queryHydrated, total, updateUrl]);
-    useEffect(() => {
-        try {
-            if (window.localStorage.getItem(AUTO_REFRESH_KEY) === "1") setAutoRefresh(true);
-            const seconds = Number(window.localStorage.getItem(REFRESH_SECS_KEY));
-            if (Number.isFinite(seconds) && seconds > 0) setRefreshSecs(Math.floor(seconds));
-        } catch {}
-    }, []);
-    useEffect(() => {
-        try {
-            window.localStorage.setItem(AUTO_REFRESH_KEY, autoRefresh ? "1" : "0");
-        } catch {}
-    }, [autoRefresh]);
-    useEffect(() => {
-        try {
-            window.localStorage.setItem(REFRESH_SECS_KEY, String(refreshSecs));
-        } catch {}
-    }, [refreshSecs]);
+        if (eventsResource.loading || total <= 0 || offset < total) return;
+        const lastPage = Math.ceil(total / pageSize);
+        updateUrl({ page: String(lastPage) });
+    }, [eventsResource.loading, offset, pageSize, total, updateUrl]);
+
+    const [autoRefresh, setAutoRefresh] = useStoredState(
+        AUTO_REFRESH_KEY,
+        false,
+        (raw) => raw === "1",
+        (on) => (on ? "1" : "0"),
+    );
+    const [refreshSecs, setRefreshSecs] = useStoredState(REFRESH_SECS_KEY, 10, (raw) => {
+        const seconds = Number(raw);
+        return Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : undefined;
+    });
     useEffect(() => {
         if (!autoRefresh) return;
-        const id = setInterval(() => void refreshEvents(), Math.max(1, refreshSecs) * 1000);
+        const id = setInterval(refreshEvents, Math.max(1, refreshSecs) * 1000);
         return () => clearInterval(id);
     }, [autoRefresh, refreshEvents, refreshSecs]);
     return (
         <main className="space-y-5">
             <header className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                    <h1 className="text-fog-100 font-serif text-2xl font-semibold tracking-tight">
+                    <h1 className="text-fog-100 text-2xl font-semibold tracking-tight">
                         Proxy events
                     </h1>
                     <p className="text-fog-400 mt-0.5 text-sm">
@@ -323,7 +277,7 @@ export default function EventsPage() {
                     <div className="border-ink-700 bg-ink-900 flex h-9 items-center gap-2 rounded-lg border px-3">
                         <StatusToggle
                             on={autoRefresh}
-                            onClick={() => setAutoRefresh((current) => !current)}
+                            onClick={() => setAutoRefresh(!autoRefresh)}
                             onLabel="Auto"
                             offLabel="Auto"
                             srLabel={autoRefresh ? "Disable auto-refresh" : "Enable auto-refresh"}
@@ -348,7 +302,7 @@ export default function EventsPage() {
                     <Button
                         variant="ghost"
                         className="h-9"
-                        onClick={() => void refreshEvents()}
+                        onClick={refreshEvents}
                         disabled={refreshing}
                     >
                         {refreshing ? "Refreshing…" : "Refresh"}
@@ -356,8 +310,6 @@ export default function EventsPage() {
                     <RangePicker
                         value={range}
                         onChange={(next) => {
-                            setRange(next);
-                            setOffset(0);
                             updateUrl({
                                 start: next.start,
                                 end: next.end,
@@ -370,8 +322,6 @@ export default function EventsPage() {
                         users={users}
                         value={userId}
                         onChange={(next) => {
-                            setUserId(next);
-                            setOffset(0);
                             updateUrl({ user: next, page: "1" });
                         }}
                     />
@@ -382,8 +332,6 @@ export default function EventsPage() {
                     value={eventType}
                     options={EVENT_TYPES}
                     onChange={(next) => {
-                        setEventType(next);
-                        setOffset(0);
                         updateUrl({ event: next, page: "1" });
                     }}
                 />
@@ -391,8 +339,6 @@ export default function EventsPage() {
                     value={model}
                     options={models}
                     onChange={(next) => {
-                        setModel(next);
-                        setOffset(0);
                         updateUrl({ model: next, page: "1" });
                     }}
                     label="Model"
@@ -409,8 +355,6 @@ export default function EventsPage() {
                         ]}
                         onChange={(next) => {
                             const nextGroupBy = next as GroupBy;
-                            setGroupBy(nextGroupBy);
-                            setOffset(0);
                             updateUrl({
                                 groupBy: nextGroupBy === "request" ? null : nextGroupBy,
                                 page: "1",
@@ -420,24 +364,6 @@ export default function EventsPage() {
                         className="mt-1"
                     />
                 </div>
-                <button
-                    onClick={() => {
-                        setOffset(0);
-                        updateUrl({
-                            event: eventType,
-                            model,
-                            user: userId,
-                            start: range.start,
-                            end: range.end,
-                            range: range.label,
-                            page: "1",
-                            pageSize: String(pageSize),
-                        });
-                    }}
-                    className="bg-brand-500 text-ink-950 rounded-lg px-3 py-2 text-sm font-semibold"
-                >
-                    Apply filters
-                </button>
             </div>
             <section className="border-ink-700 bg-ink-900 overflow-hidden rounded-xl border">
                 {loading ? (
@@ -679,12 +605,9 @@ export default function EventsPage() {
                     pageSizeOptions={[...PAGE_SIZE_OPTIONS]}
                     disabled={loading}
                     onPageSizeChange={(next) => {
-                        setPageSize(next);
-                        setOffset(0);
                         updateUrl({ pageSize: String(next), page: "1" });
                     }}
                     onPageChange={(nextPage) => {
-                        setOffset((nextPage - 1) * pageSize);
                         updateUrl({ page: String(nextPage) });
                     }}
                 />

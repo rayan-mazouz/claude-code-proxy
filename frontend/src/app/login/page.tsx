@@ -48,7 +48,7 @@ export default function LoginPage() {
                     <div className="border-ink-700 bg-ink-850 mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border shadow-[var(--shadow-card)]">
                         <ClaudeLogo className="text-brand-500 h-8 w-8" />
                     </div>
-                    <h1 className="text-fog-100 font-serif text-2xl font-semibold tracking-tight">
+                    <h1 className="text-fog-100 text-2xl font-semibold tracking-tight">
                         Claude Code Proxy
                     </h1>
                     <p className="text-fog-400 mt-1.5 text-sm">

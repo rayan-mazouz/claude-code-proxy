@@ -26,6 +26,23 @@ const PRESETS: Preset[] = [
     { label: "All time", kind: "all" },
 ];
 
+function presetRange(preset: Preset, now: Date): TimeRange {
+    if (preset.kind === "all") return { end: now.toISOString(), label: preset.label };
+    const from =
+        preset.kind === "month"
+            ? new Date(now.getFullYear(), now.getMonth(), 1)
+            : new Date(now.getTime() - (preset.minutes ?? 0) * 60000);
+    return { start: from.toISOString(), end: now.toISOString(), label: preset.label };
+}
+
+// Preset ranges are relative ("Last hour", "This month"): re-anchor them to the
+// current time whenever data is fetched, so refreshes include new activity.
+// Custom ranges are absolute and returned unchanged.
+export function resolveRange(range: TimeRange, now: Date = new Date()): TimeRange {
+    const preset = PRESETS.find((candidate) => candidate.label === range.label);
+    return preset ? presetRange(preset, now) : range;
+}
+
 const DOW = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
 const MONTHS = [
     "January",
@@ -83,15 +100,19 @@ export function RangePicker({
     const [stage, setStage] = useState<0 | 1>(0); // 0: next click sets start
 
     // Seed the draft from the committed value each time the popover opens.
-    useEffect(() => {
-        if (!open) return;
+    function toggleOpen() {
+        if (open) {
+            setOpen(false);
+            return;
+        }
         const s = value.start ? new Date(value.start) : new Date(Date.now() - 43200 * 60000);
         const e = value.end ? new Date(value.end) : new Date();
         setStart(s);
         setEnd(e);
         setStage(0);
         setView(new Date(s.getFullYear(), s.getMonth(), 1));
-    }, [open, value.start, value.end]);
+        setOpen(true);
+    }
 
     // Close on outside click / Escape.
     useEffect(() => {
@@ -109,16 +130,7 @@ export function RangePicker({
     }, [open]);
 
     function applyPreset(p: Preset) {
-        const now = new Date();
-        if (p.kind === "all") {
-            onChange({ end: now.toISOString(), label: p.label });
-        } else {
-            const from =
-                p.kind === "month"
-                    ? new Date(now.getFullYear(), now.getMonth(), 1)
-                    : new Date(now.getTime() - (p.minutes ?? 0) * 60000);
-            onChange({ start: from.toISOString(), end: now.toISOString(), label: p.label });
-        }
+        onChange(presetRange(p, new Date()));
         setOpen(false);
     }
 
@@ -171,7 +183,7 @@ export function RangePicker({
                 type="button"
                 aria-haspopup="dialog"
                 aria-expanded={open}
-                onClick={() => setOpen((v) => !v)}
+                onClick={toggleOpen}
                 className="border-ink-700 bg-ink-900 text-fog-100 hover:bg-ink-850 inline-flex h-9 items-center gap-2 rounded-lg border px-3 text-sm font-medium"
             >
                 <svg

@@ -13,9 +13,13 @@ import { api } from "@/lib/api";
 import { BrandMark, NavLinks, SignOutButton } from "./Sidebar";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-    const [open, setOpen] = useState(false);
     const [permissions, setPermissions] = useState<string[] | null>(null);
     const pathname = usePathname();
+    // The drawer remembers the route it was opened on, so any navigation (links,
+    // back/forward) closes it without an extra effect.
+    const [openOn, setOpenOn] = useState<string | null>(null);
+    const open = openOn === pathname;
+    const setOpen = (next: boolean) => setOpenOn(next ? pathname : null);
 
     useEffect(() => {
         api.authProfile()
@@ -23,16 +27,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             .catch(() => setPermissions([]));
     }, []);
 
-    // Close the drawer whenever the route changes.
-    useEffect(() => {
-        setOpen(false);
-    }, [pathname]);
-
     // Close on Escape and lock body scroll while the drawer is open.
     useEffect(() => {
         if (!open) return;
         const onKey = (e: KeyboardEvent) => {
-            if (e.key === "Escape") setOpen(false);
+            if (e.key === "Escape") setOpenOn(null);
         };
         window.addEventListener("keydown", onKey);
         document.body.style.overflow = "hidden";

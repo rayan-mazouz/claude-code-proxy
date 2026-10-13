@@ -264,11 +264,15 @@ function RuleEditor({
     const [saved, setSaved] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    useEffect(() => {
+    // Follow the saved rule when the parent passes a new one (after a save or reload),
+    // adjusting state during render rather than in an effect.
+    const [syncedRule, setSyncedRule] = useState(rule);
+    if (rule !== syncedRule) {
+        setSyncedRule(rule);
         setEnabled(rule.enabled);
         setTemplate(rule.template);
         setCooldown(rule.cooldown_seconds);
-    }, [rule]);
+    }
 
     const dirty =
         enabled !== rule.enabled ||
@@ -416,19 +420,22 @@ export default function NotificationsPage() {
     }, []);
 
     const load = useCallback(
-        async (background = false) => {
-            if (!background) setLoading(true);
-            if (!background) setError(null);
-            try {
-                applySettings(await api.notificationSettings());
-            } catch (err) {
-                setError(
-                    err instanceof Error ? err.message : "Could not load notification settings.",
-                );
-            } finally {
-                if (!background) setLoading(false);
-            }
-        },
+        () =>
+            api.notificationSettings().then(
+                (next) => {
+                    setError(null);
+                    applySettings(next);
+                    setLoading(false);
+                },
+                (err: unknown) => {
+                    setError(
+                        err instanceof Error
+                            ? err.message
+                            : "Could not load notification settings.",
+                    );
+                    setLoading(false);
+                },
+            ),
         [applySettings],
     );
 
@@ -470,7 +477,7 @@ export default function NotificationsPage() {
         try {
             const result = await api.testTelegram();
             setNotice(result.detail);
-            void load(true);
+            void load();
         } catch (err) {
             setError(err instanceof Error ? err.message : "Telegram test failed.");
         } finally {
@@ -500,7 +507,11 @@ export default function NotificationsPage() {
         return (
             <ErrorState
                 message={error ?? "Could not load notification settings."}
-                onRetry={() => void load()}
+                onRetry={() => {
+                    setLoading(true);
+                    setError(null);
+                    void load();
+                }}
             />
         );
     }
@@ -520,7 +531,7 @@ export default function NotificationsPage() {
     return (
         <div className="space-y-7">
             <header>
-                <h1 className="text-fog-100 font-serif text-2xl font-semibold tracking-tight">
+                <h1 className="text-fog-100 text-2xl font-semibold tracking-tight">
                     Notification routing
                 </h1>
                 <p className="text-fog-400 mt-0.5 text-sm">

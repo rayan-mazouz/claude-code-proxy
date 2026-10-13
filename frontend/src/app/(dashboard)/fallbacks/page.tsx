@@ -62,21 +62,23 @@ export default function FallbacksPage() {
     const [deleteTarget, setDeleteTarget] = useState<AnthropicFallback | null>(null);
     const loadRequestId = useRef(0);
 
-    const load = useCallback(async (background = false) => {
+    const load = useCallback(() => {
         const requestId = ++loadRequestId.current;
-        if (!background) setLoading(true);
-        if (!background) setError(null);
-        try {
-            const [loaded, targets] = await Promise.all([api.fallbacks(), api.egressTargets()]);
-            if (requestId !== loadRequestId.current) return;
-            setProviders(loaded);
-            setEgressTargets(targets);
-        } catch (err) {
-            if (requestId !== loadRequestId.current) return;
-            setError(err instanceof Error ? err.message : "Could not load API fallbacks.");
-        } finally {
-            if (requestId === loadRequestId.current) setLoading(false);
-        }
+        const isCurrent = () => requestId === loadRequestId.current;
+        return Promise.all([api.fallbacks(), api.egressTargets()]).then(
+            ([loaded, targets]) => {
+                if (!isCurrent()) return;
+                setError(null);
+                setProviders(loaded);
+                setEgressTargets(targets);
+                setLoading(false);
+            },
+            (err: unknown) => {
+                if (!isCurrent()) return;
+                setError(err instanceof Error ? err.message : "Could not load API fallbacks.");
+                setLoading(false);
+            },
+        );
     }, []);
 
     const applyProvider = useCallback((updated: AnthropicFallback) => {
@@ -116,7 +118,7 @@ export default function FallbacksPage() {
                 updated = await api.disableFallback(provider.id);
             }
             applyProvider(updated);
-            void load(true);
+            void load();
         } catch (err) {
             setError(err instanceof Error ? err.message : "Fallback update failed.");
         } finally {
@@ -134,7 +136,7 @@ export default function FallbacksPage() {
                     current?.filter((provider) => provider.id !== deleteTarget.id) ?? current,
             );
             setDeleteTarget(null);
-            void load(true);
+            void load();
         } catch (err) {
             setError(err instanceof Error ? err.message : "Could not delete fallback.");
         } finally {
@@ -146,7 +148,7 @@ export default function FallbacksPage() {
         <div className="space-y-5">
             <header className="flex flex-wrap items-start justify-between gap-4">
                 <div>
-                    <h1 className="text-fog-100 font-serif text-2xl font-semibold tracking-tight">
+                    <h1 className="text-fog-100 text-2xl font-semibold tracking-tight">
                         API fallbacks
                     </h1>
                     <p className="text-fog-400 mt-1 max-w-2xl text-sm">
@@ -155,7 +157,7 @@ export default function FallbacksPage() {
                     </p>
                 </div>
                 <div className="flex gap-2">
-                    <Button variant="ghost" onClick={() => void load(true)} disabled={loading}>
+                    <Button variant="ghost" onClick={() => void load()} disabled={loading}>
                         <RefreshCw size={15} /> Refresh
                     </Button>
                     <Button variant="primary" onClick={() => setShowAdd(true)}>
@@ -194,7 +196,16 @@ export default function FallbacksPage() {
                 charge.
             </div>
 
-            {error ? <ErrorState message={error} onRetry={() => void load()} /> : null}
+            {error ? (
+                <ErrorState
+                    message={error}
+                    onRetry={() => {
+                        setLoading(true);
+                        setError(null);
+                        void load();
+                    }}
+                />
+            ) : null}
             {loading && providers === null ? (
                 <Card>
                     <LoadingState label="Loading fallback providers…" />
@@ -316,7 +327,7 @@ export default function FallbacksPage() {
                     onDone={(created) => {
                         setShowAdd(false);
                         setProviders((current) => (current ? [...current, created] : [created]));
-                        void load(true);
+                        void load();
                     }}
                 />
             ) : null}
@@ -328,7 +339,7 @@ export default function FallbacksPage() {
                     onDone={(updated) => {
                         setEditTarget(null);
                         applyProvider(updated);
-                        void load(true);
+                        void load();
                     }}
                 />
             ) : null}
@@ -367,9 +378,7 @@ function SummaryCell({
                 {icon}
                 {label}
             </div>
-            <div className="text-fog-100 mt-2 font-mono text-2xl font-semibold tabular-nums">
-                {value}
-            </div>
+            <div className="text-fog-100 mt-2 text-2xl font-semibold tabular-nums">{value}</div>
             <div className="text-fog-400 mt-1 text-xs">{hint}</div>
         </div>
     );
