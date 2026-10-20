@@ -117,6 +117,31 @@ def is_available(account: AccountDb, now: Optional[datetime] = None) -> bool:
     return True
 
 
+def recovery_time(account: AccountDb, now: Optional[datetime] = None) -> Optional[datetime]:
+    """Earliest time the account may serve traffic again, or None when no recovery time is known.
+
+    Disabled and reauth-required accounts never recover on their own. An
+    exhausted quota window without a known reset time is also unbounded.
+    """
+    now = now or datetime.now(timezone.utc)
+    if account.status == AccountStatus.DISABLED or account.provider_health == ProviderHealth.REAUTH_REQUIRED:
+        return None
+
+    def aware(value: datetime) -> datetime:
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+    recovers_at = now
+    if account.cooldown_until is not None:
+        recovers_at = max(recovers_at, aware(account.cooldown_until))
+    for window in quota_windows(account):
+        if window.used_pct is None or window.used_pct < window.threshold:
+            continue
+        if window.reset_at is None:
+            return None
+        recovers_at = max(recovers_at, aware(window.reset_at))
+    return recovers_at
+
+
 def account_selection_key(account: AccountDb) -> tuple:
     """Order eligible accounts by priority, then weekly and five-hour resets."""
 

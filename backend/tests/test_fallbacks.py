@@ -1,12 +1,15 @@
 """CRUD, secret handling, spend caps, and routing tests for Anthropic-compatible fallbacks."""
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import respx
 
-from app.utils import anthropic_fallbacks, crypto
-from app.utils.postgres import AnthropicFallbackDb, UsageRecordDb
+from app.routes import proxy
+from app.utils import anthropic_fallbacks, crypto, rotation
+from app.utils.models.api import AccountStatus, ProviderHealth
+from app.utils.postgres import AccountDb, AnthropicFallbackDb, UsageRecordDb
 from app.utils.postgres.base import SessionFactory
 
 
@@ -180,3 +183,84 @@ def test_fallback_health_check_refreshes_models_without_exposing_key(client, adm
     assert result["model_count"] == 1
     assert "sk-ant-test-secret-value" not in response.text
     assert route.calls[0].request.headers["x-api-key"] == "sk-ant-test-secret-value"
+
+
+def _pool_wait_with_cooldown(monkeypatch, seed_account, cooldown_seconds):
+    """Enable a 30s pool wait, cool the only account down, and record every wait poll."""
+    monkeypatch.setattr(proxy.settings, "POOL_WAIT_TIMEOUT_SECONDS", 30)
+    account_id = seed_account("cooling")
+    with SessionFactory() as db:
+        account = db.get(AccountDb, account_id)
+        account.status = AccountStatus.COOLDOWN
+        account.cooldown_until = datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
+        db.commit()
+    sleeps = []
+
+    async def record_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(proxy.asyncio, "sleep", record_sleep)
+    return sleeps
+
+
+@respx.mock
+def test_pool_wait_is_skipped_when_no_account_recovers_within_budget(client, admin_headers, make_user, seed_account, monkeypatch):
+    _create(client, admin_headers)
+    route = respx.post("https://fallback.example/v1/messages").mock(
+        return_value=httpx.Response(200, json=_message(), headers={"content-type": "application/json"})
+    )
+    sleeps = _pool_wait_with_cooldown(monkeypatch, seed_account, cooldown_seconds=3600)
+    key = make_user("no-wait-user", fallback_enabled=True)
+
+    response = client.post(
+        "/api/v1/messages",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": "claude-haiku-4-5", "max_tokens": 8, "messages": []},
+    )
+
+    assert response.status_code == 200, response.text
+    assert route.call_count == 1
+    assert sleeps == []
+
+
+@respx.mock
+def test_pool_wait_still_polls_when_an_account_recovers_within_budget(client, admin_headers, make_user, seed_account, monkeypatch):
+    _create(client, admin_headers)
+    respx.post("https://fallback.example/v1/messages").mock(
+        return_value=httpx.Response(200, json=_message(), headers={"content-type": "application/json"})
+    )
+    sleeps = _pool_wait_with_cooldown(monkeypatch, seed_account, cooldown_seconds=10)
+    key = make_user("wait-user", fallback_enabled=True)
+
+    response = client.post(
+        "/api/v1/messages",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": "claude-haiku-4-5", "max_tokens": 8, "messages": []},
+    )
+
+    assert response.status_code == 200, response.text
+    assert sleeps
+
+
+def test_recovery_time_accounts_for_cooldown_and_exhausted_windows():
+    now = datetime.now(timezone.utc)
+    account = AccountDb(
+        status=AccountStatus.COOLDOWN,
+        provider_health=ProviderHealth.HEALTHY,
+        cooldown_until=now + timedelta(seconds=30),
+        session_used_pct=1.0,
+        session_reset_at=now + timedelta(hours=2),
+        weekly_used_pct=0.1,
+        five_hour_rotation_threshold=0.95,
+        weekly_rotation_threshold=0.95,
+    )
+    assert rotation.recovery_time(account, now) == now + timedelta(hours=2)
+
+    account.session_reset_at = None
+    assert rotation.recovery_time(account, now) is None
+
+    account.session_used_pct = 0.1
+    assert rotation.recovery_time(account, now) == now + timedelta(seconds=30)
+
+    account.provider_health = ProviderHealth.REAUTH_REQUIRED
+    assert rotation.recovery_time(account, now) is None

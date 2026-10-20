@@ -38,7 +38,6 @@ from app.utils import (
     usage,
     warmup,
 )
-from app.utils.models.api import AccountStatus, ProviderHealth
 from app.utils.postgres import AccountDb, AnthropicFallbackDb, ApiKeyDb, ProxyEventDb, UserDb, get_db, get_db_cm
 from app.utils.thinking import thinking_level_from_request
 
@@ -873,16 +872,14 @@ async def proxy_messages(
                 spare_capacity_throttled = True
                 break
             # Give cooldown and quota-refresh workers time to return an account
-            # before exposing a temporary pool failure to the client.
+            # before exposing a temporary pool failure to the client, but only
+            # when some account is expected back within the remaining budget.
             now_monotonic = asyncio.get_running_loop().time()
-            recoverable = (
-                db.query(AccountDb)
-                .filter(
-                    AccountDb.status != AccountStatus.DISABLED,
-                    AccountDb.provider_health != ProviderHealth.REAUTH_REQUIRED,
-                )
-                .count()
-                > 0
+            now_utc = datetime.now(timezone.utc)
+            wait_until = now_utc + timedelta(seconds=max(0.0, pool_wait_deadline - now_monotonic))
+            recoverable = any(
+                recovers_at is not None and recovers_at <= wait_until
+                for recovers_at in (rotation.recovery_time(candidate, now_utc) for candidate in db.query(AccountDb).all())
             )
             if not recoverable or now_monotonic >= pool_wait_deadline:
                 break
