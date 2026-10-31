@@ -23,7 +23,7 @@
 #   CCP_BIND_ADDRESS   Host IPv4 address to bind, e.g. a VPN interface IP (default: 0.0.0.0)
 #   CCP_DOMAIN         Hostname used in dashboard links (default: localhost)
 #   CCP_ALLOWED_MODELS Comma-separated model allowlist, or "default"
-#                      (default: claude-opus-5-5,claude-opus-4-7,claude-sonnet-5-5,claude-haiku-5-5)
+#                      (default: claude-opus-5-5,claude-opus-4-8,claude-opus-4-7,claude-sonnet-5-5,claude-haiku-5-5)
 #
 # The model allowlist is the one exception to keeping .env as it is: every
 # install and update sets ALLOWED_MODELS to the default list of the revision
@@ -55,7 +55,7 @@ DEFAULT_REPO_URL="https://github.com/rayan-mazouz/claude-code-proxy.git"
 DEFAULT_HTTP_PORT=18437
 DEFAULT_BIND_ADDRESS="0.0.0.0"
 DEFAULT_DOMAIN="localhost"
-DEFAULT_ALLOWED_MODELS="claude-opus-5-5,claude-opus-4-7,claude-sonnet-5-5,claude-haiku-5-5"
+DEFAULT_ALLOWED_MODELS="claude-opus-5-5,claude-opus-4-8,claude-opus-4-7,claude-sonnet-5-5,claude-haiku-5-5"
 
 REPO_URL="${CCP_REPO_URL:-${DEFAULT_REPO_URL}}"
 REPO_BRANCH="${CCP_REPO_BRANCH:-main}"
