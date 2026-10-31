@@ -182,11 +182,15 @@ export default function EventsPage() {
     const { range, userId, eventType, model, groupBy, pageSize, offset } = query;
     const [expandedRequests, setExpandedRequests] = useState<Set<string>>(new Set());
     const [captureEventId, setCaptureEventId] = useState<string | null>(null);
+    const [captureSide, setCaptureSide] = useState<"request" | "response">("response");
 
-    const userLookup = useResource(() => api.analyticsUsers(), "users");
-    const modelLookup = useResource(() => api.analyticsModels(), "models");
-    const users: UserLookup[] = userLookup.data ?? [];
-    const models: string[] = modelLookup.data ?? [];
+    // Model choices follow the selected range and user, not the selected model.
+    const lookups = useResource(
+        () => api.analyticsLookups(resolveRange(range), userId || undefined),
+        JSON.stringify([range.start ?? null, range.end ?? null, range.label, userId]),
+    );
+    const users: UserLookup[] = lookups.data?.users ?? [];
+    const models: string[] = lookups.data?.models ?? [];
 
     const eventsResource = useResource(() => {
         const bounds = resolveRange(range);
@@ -344,6 +348,7 @@ export default function EventsPage() {
                     label="Model"
                     allLabel="All models"
                     idPrefix="event-model-options"
+                    showArrow={false}
                 />
                 <div className="min-w-[220px]">
                     <span className="text-fog-400 block text-xs">Group by</span>
@@ -520,21 +525,33 @@ export default function EventsPage() {
                                                                 ) : (
                                                                     <span>{e.event_type}</span>
                                                                 )}
-                                                                {(e.event_type ===
-                                                                    "request.received" ||
+                                                                {(isSummary ||
                                                                     e.event_type ===
-                                                                        "response.returned") &&
+                                                                        "request.received" ||
+                                                                    [
+                                                                        "response.returned",
+                                                                        "response.completed",
+                                                                        "response.failed",
+                                                                        "response.interrupted",
+                                                                    ].includes(e.event_type)) &&
                                                                 e.archive_hot !== false &&
                                                                 e.request_id?.startsWith("req_") ? (
                                                                     <button
                                                                         type="button"
-                                                                        onClick={() =>
+                                                                        onClick={() => {
+                                                                            setCaptureSide(
+                                                                                !isSummary &&
+                                                                                    e.event_type ===
+                                                                                        "request.received"
+                                                                                    ? "request"
+                                                                                    : "response",
+                                                                            );
                                                                             setCaptureEventId(
                                                                                 e.request_id.slice(
                                                                                     4,
                                                                                 ),
-                                                                            )
-                                                                        }
+                                                                            );
+                                                                        }}
                                                                         className="text-fog-300 hover:text-brand-200 rounded border border-current/30 px-1.5 py-0.5 text-[10px] font-medium tracking-wide uppercase"
                                                                     >
                                                                         View capture
@@ -615,6 +632,7 @@ export default function EventsPage() {
             {captureEventId ? (
                 <RequestCaptureOverlay
                     eventId={captureEventId}
+                    initialSide={captureSide}
                     onClose={() => setCaptureEventId(null)}
                 />
             ) : null}

@@ -27,6 +27,8 @@ def test_overview_member_gets_analytics_without_management_access(client, admin_
     assert profile.status_code == 200
     assert profile.json()["permissions"] == ["analytics:read"]
     assert client.get("/api/v1/lookups/users", headers=headers).status_code == 200
+    assert client.get("/api/v1/lookups", headers=headers).status_code == 200
+    assert client.get("/api/v1/stats/dashboard", headers=headers).status_code == 200
     assert client.get("/api/v1/accounts", headers=headers).status_code == 403
     assert client.get("/api/v1/users", headers=headers).status_code == 403
     assert client.get("/api/v1/team/members", headers=headers).status_code == 403

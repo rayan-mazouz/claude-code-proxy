@@ -62,9 +62,11 @@ def list_events(
         requests = query.with_entities(
             ProxyEventDb.request_id,
             func.max(ProxyEventDb.created_at).label("latest_at"),
+            func.count().over().label("request_total"),
         ).group_by(ProxyEventDb.request_id)
-        total = requests.count()
         selected = requests.order_by(desc("latest_at"), desc(ProxyEventDb.request_id)).offset(offset).limit(limit).all()
+        # The window count rides along with the page; only a page past the end needs a separate count.
+        total = int(selected[0].request_total) if selected else requests.count()
         selected_ids = [row.request_id for row in selected]
         rows = (
             db.query(ProxyEventDb)

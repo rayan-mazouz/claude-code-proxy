@@ -63,45 +63,6 @@ export interface OverviewStats {
     average_tps: number | null;
 }
 
-// Usage ----------------------------------------------------------------------
-
-export interface UsageRecord {
-    id: string;
-    user_id: string;
-    user_name: string | null;
-    api_key_id: string | null;
-    api_key_label: string | null;
-    account_id: string | null;
-    account_label: string | null;
-    fallback_provider_id: string | null;
-    fallback_provider_label: string | null;
-    model: string;
-    input_tokens: number;
-    output_tokens: number;
-    cache_creation_input_tokens: number;
-    cache_read_input_tokens: number;
-    // Cache-creation split by TTL bucket.
-    cache_creation_5m_input_tokens: number;
-    cache_creation_1h_input_tokens: number;
-    duration_ms?: number | null;
-    tokens_per_second?: number | null;
-    // Which cache TTL this request used, if any.
-    cache_ttl: "1h" | "5m" | null;
-    // Thinking effort requested for this individual message.
-    reasoning_level: string | null;
-    // API-equivalent cost of this single request.
-    cost_usd: number;
-    status_code: number | null;
-    created_at: string;
-}
-
-export interface UsagePage {
-    total: number;
-    limit: number;
-    offset: number;
-    items: UsageRecord[];
-}
-
 export interface ProxyEvent {
     id: string;
     created_at: string;
@@ -134,13 +95,26 @@ export interface ArchiveRequestDetail {
 
 // Analytics ------------------------------------------------------------------
 
+export interface TokenDistributionPoint {
+    samples: number;
+    p10: number;
+    median: number;
+    p90: number;
+}
+
 export interface ActivityPoint {
+    requests_by_model: Record<string, number>;
+    requests_by_user: Record<string, number>;
+    input_distribution: TokenDistributionPoint | null;
+    output_distribution: TokenDistributionPoint | null;
+    model_tps: Record<string, number>;
     ts: string; // ISO 8601 UTC bucket start
     requests: number;
     tokens: number;
 }
 
 export interface ActivityResponse {
+    user_names: Record<string, string>;
     granularity: "hour" | "day";
     points: ActivityPoint[];
 }
@@ -175,20 +149,6 @@ export interface HourlyPoint {
 export interface HourlyResponse {
     points: HourlyPoint[];
     users: HourlyUser[];
-}
-
-export interface UserUsage {
-    user_id: string;
-    user_name: string | null;
-    requests: number;
-    tokens: number;
-    input_tokens: number;
-    output_tokens: number;
-    last_used_at: string | null;
-}
-
-export interface ByUserResponse {
-    users: UserUsage[];
 }
 
 // Model mix ------------------------------------------------------------------
@@ -448,4 +408,14 @@ export interface NotificationRule {
 export interface NotificationSettings {
     telegram: TelegramSettings;
     rules: NotificationRule[];
+}
+
+export interface DashboardAnalytics {
+    overview: OverviewStats;
+    activity: ActivityResponse;
+    hourly: HourlyResponse;
+    distributions: DistributionResponse | null;
+    model_mix: ModelMixResponse | null;
+    thinking_level_mix: ThinkingLevelMixResponse | null;
+    lookups: { users: UserLookup[]; models: string[] };
 }

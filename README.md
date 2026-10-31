@@ -23,6 +23,12 @@ database record is used.
 > you control and are permitted to use this way, and review the terms that
 > apply to your organization and subscription.
 
+## Dashboard throughput history
+
+The full-width **Request analytics** panel defaults to TPS and also includes requests by model and requests by user over time. Every view follows the selected date range, user, and model filters. Ranges up to two days use hourly buckets; longer ranges use daily buckets. Missing TPS measurements appear as gaps. Users contributing less than 5% of requests across the selected range are combined into one Others series in Requests by user. Model dropdowns list only models with activity in the selected range and user scope. **User analytics** opens with Models as its first tab, and **Peak requests** uses the full dashboard width.
+
+The home page fetches analytics through one read-only `/api/v1/stats/dashboard` response. Independent calculations use a bounded worker pool with separate database sessions. The Events page loads its user and model lists in one request and counts paginated request groups in the same query that selects them. None of this affects inference or account routing.
+
 ## Quick start
 
 The supported installation path is agent-assisted: copy the complete prompt in

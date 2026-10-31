@@ -5,8 +5,8 @@
 //   - Hero band: API-equivalent value delivered + tokens/requests, with the
 //     activity series (auto hourly/daily) pulled in alongside.
 //   - Infra strip: pool load and account inventory (not range-dependent).
-//   - Two-up: peak hours + top users.
-//   - Recent requests: paginated log for the range.
+//   - Quota averages, user analytics, request analytics and peak requests.
+//   - Two-up: requests by model + per-request token distribution.
 // Auto-refresh and the range selection both re-fetch every panel.
 // ---------------------------------------------------------------------------
 
@@ -22,43 +22,24 @@ import {
     PercentileBreakdown,
     TimeRange,
     ThinkingLevelMixResponse,
-    UsagePage,
-    UsageRecord,
     UserLookup,
 } from "@/lib/types";
-import {
-    formatCostUsd,
-    formatCountdown,
-    formatDateTime,
-    formatNumber,
-    formatTokens,
-    localTzAbbr,
-} from "@/lib/format";
-import {
-    Badge,
-    Button,
-    Card,
-    EmptyState,
-    ErrorState,
-    LoadingState,
-    StatusToggle,
-    TextInput,
-} from "@/components/ui";
+import { formatCountdown, formatNumber, formatTokens, localTzAbbr } from "@/lib/format";
+import { Button, Card, ErrorState, LoadingState, StatusToggle, TextInput } from "@/components/ui";
 import {
     DualAreaChart,
     DualSeries,
-    RankedBars,
     STACK_COLORS,
     StackedBarChart,
     StackSeries,
 } from "@/components/Charts";
+import { RequestAnalyticsCard } from "@/components/RequestAnalyticsCard";
 import { RangePicker, resolveRange } from "@/components/RangePicker";
 import { useResource } from "@/lib/useResource";
 import { useStoredState } from "@/lib/useStoredState";
 import { UserFilter } from "@/components/UserFilter";
 import { EventTypeFilter } from "@/components/EventTypeFilter";
 
-const PAGE_SIZE = 25;
 const AUTO_REFRESH_KEY = "dashboard_auto_refresh";
 const REFRESH_SECS_KEY = "dashboard_refresh_secs";
 
@@ -103,7 +84,6 @@ export default function OverviewPage() {
     const range = query.range;
     const filterUserId = query.userId;
     const filterModel = query.model;
-    const [offset, setOffset] = useState(0);
 
     const updateUrl = useCallback(
         (updates: Record<string, string | null | undefined>) => {
@@ -120,12 +100,6 @@ export default function OverviewPage() {
         [pathname, queryString, router],
     );
 
-    // --- filter options ---------------------------------------------------------
-    const userOptions = useResource(() => api.analyticsUsers(), "users");
-    const modelLookup = useResource(() => api.analyticsModels(), "models");
-    const allUsers: UserLookup[] = userOptions.data ?? [];
-    const modelOptions: string[] = modelLookup.data ?? [];
-
     // --- analytics ----------------------------------------------------------------
     const filterKey = JSON.stringify([
         range.start ?? null,
@@ -134,58 +108,24 @@ export default function OverviewPage() {
         filterUserId,
         filterModel,
     ]);
-    // Headline panels load first; the slower breakdowns fill in independently.
-    const primary = useResource(() => {
-        const r = resolveRange(range);
-        const u = filterUserId ?? undefined;
-        const model = filterModel || undefined;
-        return Promise.all([
-            api.overview(r, u, model),
-            api.activity(r, u, model),
-            api.hourly(r, u, model),
-            api.byUser(r, u, model),
-        ]);
-    }, filterKey);
-    const secondary = useResource(() => {
-        const r = resolveRange(range);
-        const u = filterUserId ?? undefined;
-        const model = filterModel || undefined;
-        return Promise.all([
-            api.distributions(r, u, model).catch(() => null),
-            api.modelMix(r, u, model).catch(() => null),
-            api.thinkingLevelMix(r, u, model).catch(() => null),
-        ]);
-    }, filterKey);
-    const [stats, activity, hourly, byUser] = primary.data ?? [null, null, null, null];
-    const [distro, modelMix, thinkingLevelMix] = secondary.data ?? [null, null, null];
-    const analyticsError = primary.error;
-    const analyticsLoading = primary.loading;
-
-    // --- usage table ---------------------------------------------------------
-    const usageResource = useResource(
+    // One round trip returns every panel plus the filter options for this scope.
+    const dashboard = useResource(
         () =>
-            api.usage(
-                PAGE_SIZE,
-                offset,
-                resolveRange(range),
-                filterUserId ?? undefined,
-                filterModel || undefined,
-            ),
-        JSON.stringify([filterKey, offset]),
+            api.dashboard(resolveRange(range), filterUserId ?? undefined, filterModel || undefined),
+        filterKey,
     );
-    const usage: UsagePage | null = usageResource.data ?? null;
-    const usageError = usageResource.error;
-    const usageLoading = usageResource.loading;
-
-    const refreshing = primary.loading || usageResource.loading;
-    const { reload: reloadPrimary } = primary;
-    const { reload: reloadSecondary } = secondary;
-    const { reload: reloadUsage } = usageResource;
-    const refreshAll = useCallback(() => {
-        reloadPrimary();
-        reloadSecondary();
-        reloadUsage();
-    }, [reloadPrimary, reloadSecondary, reloadUsage]);
+    const stats = dashboard.data?.overview ?? null;
+    const activity = dashboard.data?.activity ?? null;
+    const hourly = dashboard.data?.hourly ?? null;
+    const distro = dashboard.data?.distributions ?? null;
+    const modelMix = dashboard.data?.model_mix ?? null;
+    const thinkingLevelMix = dashboard.data?.thinking_level_mix ?? null;
+    const allUsers: UserLookup[] = dashboard.data?.lookups.users ?? [];
+    const modelOptions: string[] = dashboard.data?.lookups.models ?? [];
+    const analyticsError = dashboard.error;
+    const analyticsLoading = dashboard.loading;
+    const refreshing = dashboard.loading;
+    const refreshAll = dashboard.reload;
 
     // --- auto-refresh --------------------------------------------------------
     const [autoRefresh, setAutoRefresh] = useStoredState(
@@ -204,12 +144,6 @@ export default function OverviewPage() {
         const id = setInterval(refreshAll, Math.max(1, refreshSecs) * 1000);
         return () => clearInterval(id);
     }, [autoRefresh, refreshSecs, refreshAll]);
-
-    const total = usage?.total ?? 0;
-    const showingFrom = total === 0 ? 0 : offset + 1;
-    const showingTo = Math.min(offset + PAGE_SIZE, total);
-    const canPrev = offset > 0;
-    const canNext = offset + PAGE_SIZE < total;
 
     // Activity series, labelled by the granularity the backend chose.
     const granularity = activity?.granularity ?? "day";
@@ -274,7 +208,7 @@ export default function OverviewPage() {
         hourlyStackSeries.push({
             key: "other-users",
             label: "Other users",
-            color: "var(--color-fog-500)",
+            color: "var(--color-fog-400)",
         });
     }
     const tz = localTzAbbr();
@@ -301,17 +235,8 @@ export default function OverviewPage() {
         .sort((a, b) => a.sortKey - b.sortKey)
         .map(({ row }) => row);
 
-    const topUsers = (byUser?.users ?? [])
-        .filter((u) => u.tokens > 0)
-        .slice(0, 6)
-        .map((u) => ({
-            label: u.user_name ?? "—",
-            value: u.tokens,
-            sublabel: `${formatNumber(u.requests)} req`,
-        }));
-
     return (
-        <div className="space-y-5">
+        <div className="min-w-0 space-y-5">
             {/* Header */}
             <header className="flex flex-wrap items-start justify-between gap-3">
                 <div>
@@ -362,12 +287,10 @@ export default function OverviewPage() {
                     <RangePicker
                         value={range}
                         onChange={(next) => {
-                            setOffset(0);
                             updateUrl({
                                 start: next.start,
                                 end: next.end,
                                 range: next.label,
-                                page: "1",
                             });
                         }}
                     />
@@ -375,20 +298,19 @@ export default function OverviewPage() {
                         users={allUsers}
                         value={filterUserId}
                         onChange={(next) => {
-                            setOffset(0);
-                            updateUrl({ user: next, page: "1" });
+                            updateUrl({ user: next });
                         }}
                     />
                     <EventTypeFilter
                         value={filterModel}
                         options={modelOptions}
                         onChange={(next) => {
-                            setOffset(0);
-                            updateUrl({ model: next, page: "1" });
+                            updateUrl({ model: next });
                         }}
                         label="Model"
                         allLabel="All models"
                         idPrefix="overview-model-options"
+                        showArrow={false}
                         compact
                         icon={Cpu}
                     />
@@ -477,7 +399,7 @@ export default function OverviewPage() {
                         </div>
                     </Card>
 
-                    <SystemTokenFlow stats={stats} rangeLabel={range.label} />
+                    <SystemTokenFlow stats={stats} />
 
                     <QuotaAverages stats={stats} />
 
@@ -485,211 +407,40 @@ export default function OverviewPage() {
                         <UserInsightsCard modelData={modelMix} thinkingData={thinkingLevelMix} />
                     ) : null}
 
+                    {activity ? <RequestAnalyticsCard activity={activity} /> : null}
+
+                    {stats.requests > 0 ? (
+                        <PeakHoursCard
+                            hourly={hourly}
+                            data={hourlyStackData}
+                            series={hourlyStackSeries}
+                            timezone={tz}
+                        />
+                    ) : null}
+
                     {/* Independent columns avoid stretching short cards to match data-heavy neighbours. */}
                     {stats.requests > 0 ? (
-                        <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
-                            <div className="space-y-4">
+                        <div className="grid min-w-0 grid-cols-1 items-start gap-4 lg:grid-cols-2">
+                            <div className="min-w-0 space-y-4">
                                 {modelMix &&
                                 modelMix.users.some((user) => user.total_requests > 0) ? (
-                                    <>
-                                        <RequestsByModelCard data={modelMix} />
-                                        <AverageTpsByModelCard data={modelMix} />
-                                    </>
+                                    <RequestsByModelCard data={modelMix} />
                                 ) : null}
-                                <PeakHoursCard
-                                    hourly={hourly}
-                                    data={hourlyStackData}
-                                    series={hourlyStackSeries}
-                                    timezone={tz}
-                                />
                             </div>
-                            <div className="space-y-4">
+                            <div className="min-w-0 space-y-4">
                                 {distro && distro.total_requests > 0 ? (
                                     <DistributionCard distro={distro} />
                                 ) : null}
-                                <TopUsersCard data={topUsers} tone="coral" />
                             </div>
                         </div>
                     ) : null}
                 </>
             ) : null}
-
-            {/* Request-level usage moved to the Events page; keep this legacy block disabled during rollout. */}
-            {false ? (
-                <section className="space-y-3">
-                    <div className="flex items-center justify-between">
-                        <h2 className="text-fog-100 text-sm font-semibold">Recent requests</h2>
-                        {total > 0 ? (
-                            <span className="text-fog-400 font-mono text-xs">
-                                {formatNumber(showingFrom)}–{formatNumber(showingTo)} of{" "}
-                                {formatNumber(total)}
-                            </span>
-                        ) : null}
-                    </div>
-
-                    <Card className="overflow-hidden">
-                        {usageLoading ? (
-                            <LoadingState />
-                        ) : usageError ? (
-                            <ErrorState
-                                message={usageError ?? "Unable to load request history."}
-                                onRetry={reloadUsage}
-                            />
-                        ) : usage && usage!.items.length > 0 ? (
-                            <div className="max-h-[520px] overflow-auto overscroll-contain">
-                                <table className="w-full text-sm">
-                                    <thead className="bg-ink-850 sticky top-0 z-10">
-                                        <tr className="border-ink-700 text-fog-400 border-b text-left text-xs tracking-wider uppercase">
-                                            <th className="px-4 py-3 font-medium">Time</th>
-                                            <th className="px-4 py-3 font-medium">Model</th>
-                                            <th className="px-4 py-3 font-medium">Thinking</th>
-                                            <th className="px-4 py-3 font-medium">User</th>
-                                            <th className="hidden px-4 py-3 font-medium lg:table-cell">
-                                                Key
-                                            </th>
-                                            <th className="hidden px-4 py-3 font-medium lg:table-cell">
-                                                Account
-                                            </th>
-                                            <th className="px-4 py-3 text-right font-medium">In</th>
-                                            <th className="px-4 py-3 text-right font-medium">
-                                                Out
-                                            </th>
-                                            <th
-                                                className="px-4 py-3 text-right font-medium"
-                                                title="Prompt tokens written to Anthropic's cache"
-                                            >
-                                                Cache W
-                                            </th>
-                                            <th
-                                                className="px-4 py-3 text-right font-medium"
-                                                title="Prompt tokens read from Anthropic's cache"
-                                            >
-                                                Cache R
-                                            </th>
-                                            <th className="px-4 py-3 text-center font-medium">
-                                                Cache
-                                            </th>
-                                            <th className="px-4 py-3 text-right font-medium">$</th>
-                                            <th className="px-4 py-3 text-right font-medium">
-                                                Status
-                                            </th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {usage!.items.map((r) => (
-                                            <tr
-                                                key={r.id}
-                                                className="border-ink-800 hover:bg-ink-800/50 border-b last:border-0"
-                                            >
-                                                <td className="text-fog-300 px-4 py-2.5 font-mono whitespace-nowrap">
-                                                    {formatDateTime(r.created_at)}
-                                                </td>
-                                                <td className="px-4 py-2.5 whitespace-nowrap">
-                                                    <ModelCell record={r} />
-                                                </td>
-                                                <td className="text-fog-300 px-4 py-2.5 text-xs capitalize">
-                                                    {r.reasoning_level ?? "—"}
-                                                </td>
-                                                <td className="text-fog-300 px-4 py-2.5 text-xs">
-                                                    {r.user_name ?? "—"}
-                                                </td>
-                                                <td className="text-fog-400 hidden px-4 py-2.5 text-xs lg:table-cell">
-                                                    {r.api_key_label ?? "—"}
-                                                </td>
-                                                <td className="text-fog-400 hidden px-4 py-2.5 text-xs lg:table-cell">
-                                                    {r.fallback_provider_label
-                                                        ? `${r.fallback_provider_label} · API fallback`
-                                                        : (r.account_label ?? "—")}
-                                                </td>
-                                                <td className="px-4 py-2.5 text-right tabular-nums">
-                                                    <TokenCell value={r.input_tokens} />
-                                                </td>
-                                                <td className="px-4 py-2.5 text-right tabular-nums">
-                                                    <TokenCell value={r.output_tokens} />
-                                                </td>
-                                                <td className="px-4 py-2.5 text-right tabular-nums">
-                                                    <TokenCell
-                                                        value={r.cache_creation_input_tokens}
-                                                    />
-                                                </td>
-                                                <td className="px-4 py-2.5 text-right tabular-nums">
-                                                    <TokenCell value={r.cache_read_input_tokens} />
-                                                </td>
-                                                <td className="px-4 py-2.5 text-center">
-                                                    <CacheTtlCell ttl={r.cache_ttl} />
-                                                </td>
-                                                <td className="px-4 py-2.5 text-right tabular-nums">
-                                                    <CostCell value={r.cost_usd} />
-                                                </td>
-                                                <td className="px-4 py-2.5 text-right">
-                                                    <StatusBadge code={r.status_code} />
-                                                </td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
-                        ) : (
-                            <EmptyState message="No requests in this range." />
-                        )}
-                    </Card>
-
-                    {total > 0
-                        ? (() => {
-                              const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
-                              const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-                              return (
-                                  <div className="flex items-center justify-end gap-3">
-                                      <Button
-                                          variant="ghost"
-                                          disabled={!canPrev || usageLoading}
-                                          onClick={() =>
-                                              setOffset((o) => Math.max(0, o - PAGE_SIZE))
-                                          }
-                                          className="px-2"
-                                      >
-                                          ←
-                                      </Button>
-                                      <span className="text-fog-300 flex items-center gap-2 text-xs">
-                                          <span>Page</span>
-                                          <input
-                                              type="number"
-                                              min={1}
-                                              max={totalPages}
-                                              value={currentPage}
-                                              onChange={(e) => {
-                                                  const p = Math.max(
-                                                      1,
-                                                      Math.min(
-                                                          totalPages,
-                                                          Number(e.target.value) || 1,
-                                                      ),
-                                                  );
-                                                  setOffset((p - 1) * PAGE_SIZE);
-                                              }}
-                                              className="border-ink-600 bg-ink-800 text-fog-100 w-12 rounded border px-1.5 py-0.5 text-center text-xs tabular-nums"
-                                          />
-                                          <span>of {totalPages}</span>
-                                      </span>
-                                      <Button
-                                          variant="ghost"
-                                          disabled={!canNext || usageLoading}
-                                          onClick={() => setOffset((o) => o + PAGE_SIZE)}
-                                          className="px-2"
-                                      >
-                                          →
-                                      </Button>
-                                  </div>
-                              );
-                          })()
-                        : null}
-                </section>
-            ) : null}
         </div>
     );
 }
 
-function SystemTokenFlow({ stats, rangeLabel }: { stats: OverviewStats; rangeLabel: string }) {
+function SystemTokenFlow({ stats }: { stats: OverviewStats }) {
     const inputRate = Math.max(0, Math.min(100, stats.input_rate_pct));
     const outputRate = Math.max(0, Math.min(100, stats.output_rate_pct));
     const cacheHitRate = Math.max(0, Math.min(100, stats.cache_hit_rate_pct));
@@ -698,12 +449,7 @@ function SystemTokenFlow({ stats, rangeLabel }: { stats: OverviewStats; rangeLab
         <Card className="grid grid-cols-1 overflow-hidden md:grid-cols-2">
             <div className="p-5 sm:p-6">
                 <div className="flex items-center justify-between gap-3">
-                    <div className="text-fog-400 text-[11px] font-medium tracking-wider uppercase">
-                        Input vs output rate
-                    </div>
-                    <span className="text-fog-500 text-[10px] tracking-wide uppercase">
-                        {rangeLabel}
-                    </span>
+                    <h3 className="text-fog-100 text-sm font-semibold">Input vs output rate</h3>
                 </div>
                 <div className="mt-4 grid grid-cols-2 gap-4">
                     <div>
@@ -746,9 +492,7 @@ function SystemTokenFlow({ stats, rangeLabel }: { stats: OverviewStats; rangeLab
             </div>
 
             <div className="border-ink-700 border-t p-5 sm:p-6 md:border-t-0 md:border-l">
-                <div className="text-fog-400 text-[11px] font-medium tracking-wider uppercase">
-                    Input cache hit rate
-                </div>
+                <h3 className="text-fog-100 text-sm font-semibold">Input cache hit rate</h3>
                 <div className="mt-4 flex items-baseline justify-between gap-4">
                     <div className="text-fog-100 text-4xl font-semibold tabular-nums">
                         {cacheHitRate.toFixed(1)}%
@@ -815,9 +559,7 @@ function QuotaAverageCell({
         <div
             className={`p-5 sm:p-6 ${divided ? "border-ink-700 border-t md:border-t-0 md:border-l" : ""}`}
         >
-            <div className="text-fog-400 text-[11px] font-medium tracking-wider uppercase">
-                {label}
-            </div>
+            <h3 className="text-fog-100 text-sm font-semibold">{label}</h3>
             <div className="text-fog-100 mt-4 text-4xl font-semibold tabular-nums">
                 {percentage.toFixed(1)}%
             </div>
@@ -860,10 +602,8 @@ function PeakHoursCard({
         <Card className="p-5">
             <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                    <h3 className="text-fog-100 text-sm font-semibold">Peak hours</h3>
-                    <p className="text-fog-400 mt-0.5 text-xs">
-                        Requests by hour ({timezone}); five busiest users plus everyone else
-                    </p>
+                    <h3 className="text-fog-100 text-sm font-semibold">Peak requests</h3>
+                    <p className="text-fog-400 mt-0.5 text-xs">Requests by hour · {timezone}</p>
                 </div>
             </div>
             <div className="mt-3">
@@ -874,7 +614,7 @@ function PeakHoursCard({
                             series={series}
                             axisInterval={2}
                             format={(value) => `${formatNumber(value)} req`}
-                            height={200}
+                            height={240}
                         />
                     ) : (
                         <div className="text-fog-400 flex h-44 items-center justify-center text-sm">
@@ -901,34 +641,6 @@ function PeakHoursCard({
                     ))}
                 </div>
             ) : null}
-        </Card>
-    );
-}
-
-function TopUsersCard({
-    data,
-    tone,
-}: {
-    data: Array<{ label: string; value: number; sublabel: string }>;
-    tone: "coral";
-}) {
-    return (
-        <Card className="p-5">
-            <div className="flex items-start justify-between gap-3">
-                <div>
-                    <h3 className="text-fog-100 text-sm font-semibold">Top users</h3>
-                    <p className="text-fog-400 mt-0.5 text-xs">Six highest token consumers</p>
-                </div>
-            </div>
-            <div className="mt-4">
-                {data.length > 0 ? (
-                    <RankedBars data={data} tone={tone} format={(value) => formatTokens(value)} />
-                ) : (
-                    <div className="text-fog-400 flex h-44 items-center justify-center text-sm">
-                        No usage in this range.
-                    </div>
-                )}
-            </div>
         </Card>
     );
 }
@@ -961,7 +673,7 @@ function UserInsightsCard({
     modelData: ModelMixResponse;
     thinkingData: ThinkingLevelMixResponse | null;
 }) {
-    const [view, setView] = useState<UserInsightView>("tokens");
+    const [view, setView] = useState<UserInsightView>("models");
     const users = modelData.users.filter((user) => user.total_requests > 0);
     const allModels = Array.from(
         new Set(users.flatMap((user) => user.models.map((model) => model.model))),
@@ -982,12 +694,7 @@ function UserInsightsCard({
         <Card className="overflow-hidden">
             <div className="flex flex-col gap-4 p-5 sm:flex-row sm:items-end sm:justify-between">
                 <div>
-                    <div className="text-fog-400 text-xs font-medium tracking-wider uppercase">
-                        User analytics
-                    </div>
-                    <p className="text-fog-300 mt-1 text-sm">
-                        Compare every active user without extending the page.
-                    </p>
+                    <h3 className="text-fog-100 text-sm font-semibold">User analytics</h3>
                     <div className="text-fog-500 mt-1 font-mono text-[11px]">
                         {formatNumber(users.length)} active users
                     </div>
@@ -997,7 +704,7 @@ function UserInsightsCard({
                     role="tablist"
                     aria-label="User analytics view"
                 >
-                    {(["tokens", "models", "thinking"] as const).map((tab) => (
+                    {(["models", "tokens", "thinking"] as const).map((tab) => (
                         <button
                             key={tab}
                             type="button"
@@ -1091,11 +798,6 @@ function UserInsightsCard({
                     </div>
                 )}
             </div>
-            {users.length > 5 ? (
-                <div className="border-ink-700 text-fog-500 border-t px-5 py-2 text-center text-[10px] tracking-wide uppercase">
-                    Scroll inside this panel to inspect all {formatNumber(users.length)} users
-                </div>
-            ) : null}
         </Card>
     );
 }
@@ -1259,66 +961,6 @@ function RequestsByModelCard({ data }: { data: ModelMixResponse }) {
     );
 }
 
-function AverageTpsByModelCard({ data }: { data: ModelMixResponse }) {
-    const byModel: Record<string, { measuredRequests: number; tps: number }> = {};
-    for (const user of data.users) {
-        for (const model of user.models) {
-            const entry = (byModel[model.model] ??= { measuredRequests: 0, tps: 0 });
-            if (model.average_tps != null && model.average_tps > 0) {
-                entry.measuredRequests += model.requests;
-                entry.tps += model.average_tps * model.requests;
-            }
-        }
-    }
-    const rows = Object.entries(byModel)
-        .map(([model, value]) => ({
-            model,
-            tps: value.measuredRequests ? value.tps / value.measuredRequests : null,
-        }))
-        .filter((row) => row.tps != null)
-        .sort((a, b) => (b.tps ?? 0) - (a.tps ?? 0));
-    const maxTps = rows[0]?.tps ?? 1;
-    const allModels = Array.from(
-        new Set(data.users.flatMap((user) => user.models.map((model) => model.model))),
-    );
-
-    return (
-        <Card className="p-5">
-            <h3 className="text-fog-100 text-sm font-semibold">Average TPS by model</h3>
-            <p className="text-fog-400 mt-0.5 mb-4 text-xs">Measured output tokens per second</p>
-            {rows.length === 0 ? (
-                <p className="text-fog-400 text-xs">No TPS measurements in this range.</p>
-            ) : (
-                <div className="space-y-2.5">
-                    {rows.map((row) => {
-                        const index = allModels.indexOf(row.model);
-                        return (
-                            <div key={row.model} className="flex items-center gap-2.5">
-                                <span className="text-fog-200 w-28 shrink-0 truncate font-mono text-xs">
-                                    {shortModel(row.model)}
-                                </span>
-                                <div className="bg-ink-800 h-5 flex-1 overflow-hidden rounded">
-                                    <div
-                                        className="h-full rounded"
-                                        style={{
-                                            width: `${Math.max(((row.tps ?? 0) / maxTps) * 100, 2)}%`,
-                                            backgroundColor: modelColor(index),
-                                            opacity: 0.85,
-                                        }}
-                                    />
-                                </div>
-                                <span className="text-fog-200 w-20 text-right text-xs tabular-nums">
-                                    {formatNumber(row.tps ?? 0)} t/s
-                                </span>
-                            </div>
-                        );
-                    })}
-                </div>
-            )}
-        </Card>
-    );
-}
-
 const THINKING_LEVEL_ORDER = [
     "max",
     "high",
@@ -1347,39 +989,6 @@ function orderedThinkingLevels(data: ThinkingLevelMixResponse): string[] {
         if (bi === -1) return 1 - THINKING_LEVEL_ORDER.length;
         return ai - bi;
     });
-}
-
-function CacheTtlCell({ ttl }: { ttl: "1h" | "5m" | null }) {
-    if (!ttl) return <span className="text-fog-500">·</span>;
-    return <Badge tone={ttl === "1h" ? "brand" : "neutral"}>{ttl}</Badge>;
-}
-
-function CostCell({ value }: { value: number }) {
-    if (!value || value <= 0) return <span className="text-fog-400">—</span>;
-    return <span className="text-fog-400 text-xs">{formatCostUsd(value)}</span>;
-}
-
-function ModelCell({ record }: { record: UsageRecord }) {
-    return <span className="text-fog-200 font-mono text-xs">{record.model}</span>;
-}
-
-// Zeros are common (count_tokens, cache misses); render them muted so the real
-// numbers stand out.
-function TokenCell({ value }: { value: number }) {
-    if (value <= 0) return <span className="text-fog-400">·</span>;
-    return <span className="text-fog-300">{formatTokens(value)}</span>;
-}
-
-function StatusBadge({ code }: { code: number | null }) {
-    const tone =
-        code == null
-            ? "warn"
-            : code >= 200 && code < 300
-              ? "good"
-              : code >= 400 && code < 500
-                ? "warn"
-                : "bad";
-    return <Badge tone={tone}>{code ?? "—"}</Badge>;
 }
 
 const PERCENTILE_LABELS = ["Min", "P25", "P50", "P75", "P90", "P95", "Max"] as const;
@@ -1429,21 +1038,17 @@ function DistributionCard({ distro }: { distro: DistributionResponse }) {
     return (
         <Card className="p-5">
             <div className="flex items-baseline justify-between">
-                <div className="text-fog-400 text-xs font-medium tracking-wider uppercase">
+                <h3 className="text-fog-100 text-sm font-semibold">
                     Per-request token distribution
-                </div>
+                </h3>
             </div>
             <div className="mt-4 grid grid-cols-1 gap-6 lg:grid-cols-2">
                 <div>
-                    <h4 className="text-fog-200 mb-3 text-xs font-semibold tracking-wider uppercase">
-                        Input tokens
-                    </h4>
+                    <h4 className="text-fog-200 mb-3 text-xs font-semibold">Input tokens</h4>
                     {bars(distro.input_tokens, "coral")}
                 </div>
                 <div>
-                    <h4 className="text-fog-200 mb-3 text-xs font-semibold tracking-wider uppercase">
-                        Output tokens
-                    </h4>
+                    <h4 className="text-fog-200 mb-3 text-xs font-semibold">Output tokens</h4>
                     {bars(distro.output_tokens, "amber")}
                 </div>
             </div>

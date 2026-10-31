@@ -329,15 +329,17 @@ function BodyView({ body, side }: { body: string; side: "request" | "response" }
 
 export function RequestCaptureOverlay({
     eventId,
+    initialSide = "request",
     onClose,
 }: {
     eventId: string;
+    initialSide?: "request" | "response";
     onClose: () => void;
 }) {
     const [detail, setDetail] = useState<ArchiveRequestDetail | null>(null);
     const [requestBody, setRequestBody] = useState("");
     const [responseBody, setResponseBody] = useState("");
-    const [tab, setTab] = useState<"request" | "response">("request");
+    const [tab, setTab] = useState<"request" | "response">(initialSide);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     useEffect(() => {

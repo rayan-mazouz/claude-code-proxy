@@ -3,9 +3,9 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from app.model_catalog import configured_model_ids
 from app.utils import security
-from app.utils.postgres import UserDb, get_db
+from app.utils.models.api import TimeRange
+from app.utils.postgres import UsageRecordDb, UserDb, get_db
 
 router = APIRouter(tags=["Dashboard lookups"], prefix="/lookups")
 
@@ -21,6 +21,26 @@ def list_user_lookups(
 
 
 @router.get("/models")
-def list_model_lookups(_: str = Depends(security.require_admin)) -> dict:  # noqa: B008
-    """Return the configured model catalog used by analytics filters."""
-    return {"models": list(configured_model_ids())}
+def list_model_lookups(
+    rng: TimeRange = Depends(TimeRange.get_request),
+    _: str = Depends(security.require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Only models with recorded activity in the selected range/user scope."""
+    query = db.query(UsageRecordDb.model)
+    if rng.start is not None:
+        query = query.filter(UsageRecordDb.created_at >= rng.start)
+    if rng.end is not None:
+        query = query.filter(UsageRecordDb.created_at < rng.end)
+    if rng.user_id is not None:
+        query = query.filter(UsageRecordDb.user_id == rng.user_id)
+    return {"models": [row.model for row in query.distinct().order_by(UsageRecordDb.model).all()]}
+
+
+@router.get("")
+def analytics_lookups(
+    rng: TimeRange = Depends(TimeRange.get_request),
+    _: str = Depends(security.require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    return {**list_user_lookups(_=_, db=db), **list_model_lookups(rng=rng, _=_, db=db)}

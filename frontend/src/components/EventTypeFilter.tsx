@@ -11,6 +11,7 @@ type EventTypeFilterProps = {
     allLabel?: string;
     idPrefix?: string;
     compact?: boolean;
+    showArrow?: boolean;
     icon?: LucideIcon;
 };
 
@@ -22,6 +23,7 @@ export function EventTypeFilter({
     allLabel = "All events",
     idPrefix = "event-type-options",
     compact = false,
+    showArrow = true,
     icon: Icon,
 }: EventTypeFilterProps) {
     const [open, setOpen] = useState(false);
@@ -65,10 +67,12 @@ export function EventTypeFilter({
                 <span className={compact ? "max-w-[14rem] truncate" : "truncate"}>
                     {selectedLabel}
                 </span>
-                <ChevronDown
-                    size={16}
-                    className={`text-fog-400 ml-3 shrink-0 transition-transform ${open ? "rotate-180" : ""}`}
-                />
+                {showArrow ? (
+                    <ChevronDown
+                        size={16}
+                        className={`text-fog-400 ml-3 shrink-0 transition-transform ${open ? "rotate-180" : ""}`}
+                    />
+                ) : null}
             </button>
             {open ? (
                 <div

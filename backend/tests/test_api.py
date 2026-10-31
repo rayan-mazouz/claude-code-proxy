@@ -1267,6 +1267,15 @@ def test_overview_aggregates_active_pool_capacity(client, admin_headers, seed_ac
     assert datetime.fromisoformat(overview["weekly_reset_at"].replace("Z", "+00:00")) == now + timedelta(hours=2)
 
 
+def test_overview_counts_weekly_exhaustion_as_full_five_hour_usage(client, admin_headers, seed_account):
+    seed_account("weekly-exhausted", session_used_pct=0.1, weekly_used_pct=1.0)
+    seed_account("available", session_used_pct=0.2, weekly_used_pct=0.5)
+
+    overview = client.get("/api/v1/stats/overview", headers=admin_headers).json()
+
+    assert overview["five_hour_average_pct"] == 60.0
+
+
 def test_user_scoped_stats_hide_unselected_users(client, admin_headers, make_user):
     make_user("alice")
     make_user("bob")

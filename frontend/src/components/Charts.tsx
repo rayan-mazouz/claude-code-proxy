@@ -5,8 +5,6 @@
 //
 //   - TimeSeriesChart: area or bar over a time axis (daily volume, hourly peaks)
 //     with hairline horizontal gridlines, muted axes and a dark tooltip card.
-//   - RankedBars: a horizontal ranked list (e.g. top users) — clearer than a
-//     vertical bar for a handful of labelled categories.
 //   - ChartCard: the surrounding card with title, subtitle and an optional
 //     total / control row.
 //
@@ -432,62 +430,6 @@ export function StackedBarChart({
                 </BarChart>
             </ResponsiveContainer>
         </div>
-    );
-}
-
-// --- Ranked horizontal bars (e.g. top users) --------------------------------
-
-export interface RankedDatum {
-    label: string;
-    value: number;
-    sublabel?: string;
-}
-
-export function RankedBars({
-    data,
-    tone = "coral",
-    format = (v: number) => formatNumber(v),
-}: {
-    data: RankedDatum[];
-    tone?: ChartTone;
-    format?: (v: number) => string;
-}) {
-    const color = TONE_COLOR[tone];
-    const max = Math.max(1, ...data.map((d) => d.value));
-
-    return (
-        <ul className="space-y-3">
-            {data.map((d, i) => (
-                <li key={i} className="group">
-                    <div className="mb-1 flex items-baseline justify-between gap-3">
-                        <span className="text-fog-200 flex min-w-0 items-center gap-2 text-sm">
-                            <span className="text-fog-400 w-4 shrink-0 text-right text-xs tabular-nums">
-                                {i + 1}
-                            </span>
-                            <span className="truncate">{d.label}</span>
-                            {d.sublabel ? (
-                                <span className="text-fog-400 shrink-0 text-[11px]">
-                                    {d.sublabel}
-                                </span>
-                            ) : null}
-                        </span>
-                        <span className="text-fog-100 shrink-0 text-sm tabular-nums">
-                            {format(d.value)}
-                        </span>
-                    </div>
-                    <div className="bg-ink-800 h-5 w-full overflow-hidden rounded">
-                        <div
-                            className="h-full rounded transition-all"
-                            style={{
-                                width: `${Math.max((d.value / max) * 100, 2)}%`,
-                                backgroundColor: color,
-                                opacity: 0.85,
-                            }}
-                        />
-                    </div>
-                </li>
-            ))}
-        </ul>
     );
 }
 

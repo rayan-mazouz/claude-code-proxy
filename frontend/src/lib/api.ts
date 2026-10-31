@@ -10,25 +10,18 @@
 import {
     Account,
     EgressTarget,
-    ActivityResponse,
     ApiKey,
     ApiKeyCreated,
     AnthropicFallback,
-    ByUserResponse,
-    DistributionResponse,
-    HourlyResponse,
     LoginResponse,
-    ModelMixResponse,
     NotificationSettings,
     OAuthStartResponse,
-    OverviewStats,
     TimeRange,
-    ThinkingLevelMixResponse,
     ThinkingLevel,
-    UsagePage,
     ProxyEventPage,
     ArchiveRequestDetail,
     AuthProfile,
+    DashboardAnalytics,
     DashboardMember,
     UserLookup,
     User,
@@ -181,14 +174,6 @@ export const api = {
     authProfile() {
         return request<AuthProfile>("/v1/auth/me");
     },
-    async analyticsUsers(): Promise<UserLookup[]> {
-        const result = await request<{ users: UserLookup[] }>("/v1/lookups/users");
-        return result.users;
-    },
-    async analyticsModels(): Promise<string[]> {
-        const result = await request<{ models: string[] }>("/v1/lookups/models");
-        return result.models;
-    },
     teamMembers() {
         return request<{ members: DashboardMember[] }>("/v1/team/members");
     },
@@ -216,14 +201,16 @@ export const api = {
 
     // Overview + analytics. Each accepts an optional range and user filter;
     // omitting the range lets the backend apply its per-endpoint default.
-    overview(range?: TimeRange, userId?: string, model?: string) {
-        return request<OverviewStats>(
-            `/v1/stats/overview?${filterParams(range, userId, model).slice(1)}`,
+    // One response with every overview panel and its filter options.
+    dashboard(range?: TimeRange, userId?: string, model?: string) {
+        return request<DashboardAnalytics>(
+            `/v1/stats/dashboard?${filterParams(range, userId, model).slice(1)}`,
         );
     },
-    usage(limit: number, offset: number, range?: TimeRange, userId?: string, model?: string) {
-        return request<UsagePage>(
-            `/v1/stats/usage?limit=${limit}&offset=${offset}${filterParams(range, userId, model)}`,
+    // Users plus the models with activity in the range and user scope.
+    analyticsLookups(range?: TimeRange, userId?: string) {
+        return request<{ users: UserLookup[]; models: string[] }>(
+            `/v1/lookups?${filterParams(range, userId).slice(1)}`,
         );
     },
     events(
@@ -267,36 +254,6 @@ export const api = {
             throw new ApiError(detail, res.status);
         }
         return text;
-    },
-    activity(range?: TimeRange, userId?: string, model?: string) {
-        return request<ActivityResponse>(
-            `/v1/stats/activity?${filterParams(range, userId, model).slice(1)}`,
-        );
-    },
-    hourly(range?: TimeRange, userId?: string, model?: string) {
-        return request<HourlyResponse>(
-            `/v1/stats/hourly?${filterParams(range, userId, model).slice(1)}`,
-        );
-    },
-    byUser(range?: TimeRange, userId?: string, model?: string) {
-        return request<ByUserResponse>(
-            `/v1/stats/by-user?${filterParams(range, userId, model).slice(1)}`,
-        );
-    },
-    distributions(range?: TimeRange, userId?: string, model?: string) {
-        return request<DistributionResponse>(
-            `/v1/stats/distributions?${filterParams(range, userId, model).slice(1)}`,
-        );
-    },
-    modelMix(range?: TimeRange, userId?: string, model?: string) {
-        return request<ModelMixResponse>(
-            `/v1/stats/model-mix?${filterParams(range, userId, model).slice(1)}`,
-        );
-    },
-    thinkingLevelMix(range?: TimeRange, userId?: string, model?: string) {
-        return request<ThinkingLevelMixResponse>(
-            `/v1/stats/thinking-level-mix?${filterParams(range, userId, model).slice(1)}`,
-        );
     },
 
     // Accounts

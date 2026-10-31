@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Shared time-range filter -----------------------------------------------------
 
@@ -149,6 +149,8 @@ class OverviewResponse(BaseModel):
     usable_accounts: int
     five_hour_average_pct: float
     weekly_average_pct: float
+    monthly_average_pct: float
+    monthly_reset_at: Optional[datetime]
     # Earliest upcoming reset among active (authenticated and enabled) accounts.
     five_hour_reset_at: Optional[datetime]
     weekly_reset_at: Optional[datetime]
@@ -177,13 +179,26 @@ class OverviewResponse(BaseModel):
 # GET /stats/activity
 
 
+class TokenDistributionPoint(BaseModel):
+    samples: int
+    p10: float
+    median: float
+    p90: float
+
+
 class ActivityPoint(BaseModel):
+    requests_by_model: dict[str, int] = Field(default_factory=dict)
+    requests_by_user: dict[str, int] = Field(default_factory=dict)
+    input_distribution: Optional[TokenDistributionPoint] = None
+    output_distribution: Optional[TokenDistributionPoint] = None
+    model_tps: dict[str, float] = Field(default_factory=dict)
     ts: str  # ISO 8601 UTC bucket start ("2026-06-21T00:00:00+00:00" for a day, "...T14:00:00+00:00" for an hour)
     requests: int
     tokens: int
 
 
 class ActivityResponse(BaseModel):
+    user_names: dict[str, str] = Field(default_factory=dict)
     granularity: str  # "hour" or "day" -- chosen from the range span so short windows aren't a single bar.
     points: List[ActivityPoint]
 
