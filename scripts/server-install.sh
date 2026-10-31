@@ -12,7 +12,7 @@
 #
 # The script is safe to re-run. `install` on a server that already has an
 # installation behaves like `update`: it backs up the database first and keeps
-# every existing setting in .env.
+# the existing settings in .env, apart from the model allowlist (see below).
 #
 # Optional overrides. A fresh install applies all of them (with the defaults
 # below); on an existing installation only the ones you set change:
@@ -22,7 +22,14 @@
 #   CCP_HTTP_PORT      Host port Traefik listens on (default: 18437)
 #   CCP_BIND_ADDRESS   Host IPv4 address to bind, e.g. a VPN interface IP (default: 0.0.0.0)
 #   CCP_DOMAIN         Hostname used in dashboard links (default: localhost)
-#   CCP_ALLOWED_MODELS Comma-separated model allowlist (default: claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5)
+#   CCP_ALLOWED_MODELS Comma-separated model allowlist, or "default"
+#                      (default: claude-opus-5-5,claude-opus-4-7,claude-sonnet-5-5,claude-haiku-5-5)
+#
+# The model allowlist is the one exception to keeping .env as it is: every
+# install and update sets ALLOWED_MODELS to the default list of the revision
+# being deployed, so new models arrive with the update. A list passed through
+# CCP_ALLOWED_MODELS is recorded and kept across updates instead;
+# CCP_ALLOWED_MODELS=default goes back to following the default list.
 #
 # The checkout is never edited: server-specific Compose changes live in
 # ${OVERRIDE_FILE}, and all settings live in the checkout's ignored .env.
@@ -48,10 +55,13 @@ DEFAULT_REPO_URL="https://github.com/rayan-mazouz/claude-code-proxy.git"
 DEFAULT_HTTP_PORT=18437
 DEFAULT_BIND_ADDRESS="0.0.0.0"
 DEFAULT_DOMAIN="localhost"
-DEFAULT_ALLOWED_MODELS="claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5"
+DEFAULT_ALLOWED_MODELS="claude-opus-5-5,claude-opus-4-7,claude-sonnet-5-5,claude-haiku-5-5"
 
 REPO_URL="${CCP_REPO_URL:-${DEFAULT_REPO_URL}}"
 REPO_BRANCH="${CCP_REPO_BRANCH:-main}"
+# Model list chosen by the operator; empty means ALLOWED_MODELS follows the default list.
+PINNED_MODELS="${CCP_ALLOWED_MODELS:-}"
+[[ "${PINNED_MODELS}" == default ]] && PINNED_MODELS=""
 
 APPARMOR_PROFILE="/etc/apparmor.d/usr.bin.rootlesskit"
 DOCKER_PACKAGES=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras)
@@ -135,7 +145,7 @@ validate_overrides() {
         die "CCP_DOMAIN must be a plain hostname such as proxy.example.com (no scheme, port or path)."
     fi
     if [[ -n "${CCP_ALLOWED_MODELS:-}" ]] && ! valid_models "${CCP_ALLOWED_MODELS}"; then
-        die "CCP_ALLOWED_MODELS must be a comma-separated list of model IDs without spaces."
+        die "CCP_ALLOWED_MODELS must be \"default\" or a comma-separated list of model IDs without spaces."
     fi
     [[ "${REPO_BRANCH}" =~ ^[A-Za-z0-9._/-]+$ ]] || die "CCP_REPO_BRANCH contains unsupported characters."
     [[ "${REPO_URL}" =~ ^(https://|git@|ssh://)[^[:space:]]+$ ]] || die "CCP_REPO_URL must be an https://, ssh:// or git@ URL."
@@ -264,6 +274,10 @@ load_state() {
         value="$(sed -n 's/^REPO_BRANCH=//p' "${STATE_FILE}" | tail -n 1)"
         [[ -n "${value}" ]] && REPO_BRANCH="${value}"
     fi
+    if [[ -z "${CCP_ALLOWED_MODELS:-}" ]]; then
+        value="$(sed -n 's/^ALLOWED_MODELS=//p' "${STATE_FILE}" | tail -n 1)"
+        [[ -n "${value}" ]] && PINNED_MODELS="${value}"
+    fi
     return 0
 }
 
@@ -276,6 +290,7 @@ APP_HOME=${APP_HOME}
 APP_DIR=${APP_DIR}
 REPO_URL=${REPO_URL}
 REPO_BRANCH=${REPO_BRANCH}
+ALLOWED_MODELS=${PINNED_MODELS}
 DOCKER_INSTALLED_BY_SCRIPT=${DOCKER_INSTALLED_BY_SCRIPT}
 EOF
     chmod 0600 "${STATE_FILE}"
@@ -547,9 +562,22 @@ postgres_volume_exists() {
     as_app docker volume inspect "${COMPOSE_PROJECT}_postgres-data" >/dev/null 2>&1
 }
 
-# Create .env when missing, generate any missing secret, and fill in settings
-# that are not set yet. Existing values are never replaced here; explicit
-# CCP_* overrides are applied separately by apply_env_overrides.
+# The default model list of the checked-out revision. The copy of this script
+# that is running may be older than the revision it just pulled.
+checkout_default_models() {
+    local script="${APP_DIR}/scripts/server-install.sh" value=""
+
+    [[ -f "${script}" ]] && value="$(sed -n 's/^DEFAULT_ALLOWED_MODELS="\([^"]*\)"$/\1/p' "${script}" | tail -n 1)"
+    if [[ -n "${value}" ]] && valid_models "${value}"; then
+        echo "${value}"
+    else
+        echo "${DEFAULT_ALLOWED_MODELS}"
+    fi
+}
+
+# Create .env when missing, generate any missing secret, fill in settings that
+# are not set yet, and set the model allowlist. Other existing values are never
+# replaced here; explicit CCP_* overrides are applied by apply_env_overrides.
 configure_env() {
     local env_file="${APP_DIR}/.env" fresh=0
 
@@ -590,7 +618,6 @@ configure_env() {
         set_env_value HTTP_PORT "${DEFAULT_HTTP_PORT}"
         set_env_value HTTP_BIND_ADDRESS "${DEFAULT_BIND_ADDRESS}"
         set_env_value DOMAIN "${DEFAULT_DOMAIN}"
-        set_env_value ALLOWED_MODELS "${DEFAULT_ALLOWED_MODELS}"
         set_env_value ARCHIVE_ENABLED false
     fi
 
@@ -599,13 +626,14 @@ configure_env() {
     default_env_value HTTP_PORT "${DEFAULT_HTTP_PORT}"
     default_env_value HTTP_BIND_ADDRESS "${DEFAULT_BIND_ADDRESS}"
     default_env_value DOMAIN "${DEFAULT_DOMAIN}"
-    default_env_value ALLOWED_MODELS "${DEFAULT_ALLOWED_MODELS}"
     default_env_value ARCHIVE_ENABLED false
     default_env_value POSTGRES_HOST postgres
     default_env_value POSTGRES_PORT 5432
     default_env_value POSTGRES_USER claude_proxy
     default_env_value POSTGRES_DB claude_code_proxy
     default_env_value ADMIN_USERNAME admin
+
+    set_env_value ALLOWED_MODELS "${PINNED_MODELS:-$(checkout_default_models)}"
 
     apply_env_overrides
     write_credentials
@@ -617,7 +645,6 @@ apply_env_overrides() {
     [[ -n "${CCP_HTTP_PORT:-}" ]] && set_env_value HTTP_PORT "${CCP_HTTP_PORT}"
     [[ -n "${CCP_BIND_ADDRESS:-}" ]] && set_env_value HTTP_BIND_ADDRESS "${CCP_BIND_ADDRESS}"
     [[ -n "${CCP_DOMAIN:-}" ]] && set_env_value DOMAIN "${CCP_DOMAIN}"
-    [[ -n "${CCP_ALLOWED_MODELS:-}" ]] && set_env_value ALLOWED_MODELS "${CCP_ALLOWED_MODELS}"
     return 0
 }
 

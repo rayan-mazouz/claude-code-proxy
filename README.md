@@ -56,7 +56,11 @@ sudo ./server-install.sh status
 ```
 
 Re-running `install` on an existing server updates it in place and keeps its
-settings. The admin credentials are written to
+settings. The model allowlist is the exception: every install and update sets
+`ALLOWED_MODELS` to the default list of the deployed revision, so new models
+arrive with the update. Pass `CCP_ALLOWED_MODELS=model-a,model-b` to choose your
+own list (it is kept across later updates), or `CCP_ALLOWED_MODELS=default` to
+follow the default list again. The admin credentials are written to
 `/root/claude-code-proxy-admin.txt`. Updates restart containers in place;
 use the blue-green flow below when you need zero-downtime rollouts.
 
@@ -154,6 +158,7 @@ Sonnet, Haiku, Opus, and Fable families:
 | `claude-fable-5-1` | Fable |
 | `claude-haiku-4-5-20251001` | Haiku |
 | `claude-opus-4-6` | Opus |
+| `claude-opus-4-7` | Opus |
 | `claude-opus-4-8` | Opus |
 | `claude-opus-5` | Opus |
 | `claude-opus-5-5` | Opus |
