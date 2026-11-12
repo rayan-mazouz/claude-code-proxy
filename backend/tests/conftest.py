@@ -5,6 +5,7 @@
 import atexit
 import os
 import secrets as _secrets
+import tempfile
 
 from cryptography.fernet import Fernet
 from testcontainers.community.postgres import PostgresContainer
@@ -17,8 +18,15 @@ _POSTGRES = PostgresContainer("postgres:16-alpine")
 _POSTGRES.start()
 atexit.register(_POSTGRES.stop)
 
+# The editable config file outranks the environment, so point it at an empty file: a developer's repo-root .env
+# must not override the hermetic values below.
+_CONFIG_FILE = tempfile.NamedTemporaryFile(prefix="ccp-test-", suffix=".env", delete=False)
+_CONFIG_FILE.close()
+atexit.register(os.unlink, _CONFIG_FILE.name)
+
 os.environ.update(
     {
+        "CCP_CONFIG_FILE": _CONFIG_FILE.name,
         "POSTGRES_HOST": _POSTGRES.get_container_host_ip(),
         "POSTGRES_PORT": str(_POSTGRES.get_exposed_port(5432)),
         "POSTGRES_USER": _POSTGRES.username,

@@ -8,6 +8,7 @@ backend/.venv/
 
 # Local data / secrets
 .env
+.env.bak
 backend/data/
 *.db
 *.sqlite3

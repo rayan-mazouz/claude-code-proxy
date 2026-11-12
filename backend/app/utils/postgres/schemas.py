@@ -22,7 +22,7 @@ from sqlalchemy import (
 
 from app import config
 from app.utils.models.api import AccountStatus, ProviderHealth
-from app.utils.thinking import THINKING_LEVELS
+from app.utils.thinking import thinking_levels
 
 from .base import DatabaseBase
 
@@ -61,6 +61,10 @@ class AccountDb(DatabaseBase):
     weekly_reset_at = Column(DateTime(timezone=True), nullable=True)
     monthly_used_pct = Column(Float, nullable=True)
     monthly_reset_at = Column(DateTime(timezone=True), nullable=True)
+    # False once the usage probe reports no 5-hour window (current Max plans only have weekly limits).
+    has_five_hour_limit = Column(Boolean, nullable=False, default=True, server_default="true")
+    # Model-scoped weekly allowances from the usage probe, e.g. [{"model": "Fable", "used_pct": 0.2, "reset_at": ...}].
+    scoped_limits_json = Column(Text, nullable=False, default="[]", server_default="[]")
     # Per-window rotation policies (tuned in the dashboard); seeded with config defaults on every new account.
     five_hour_rotation_threshold = Column(
         Float,
@@ -95,7 +99,8 @@ class AccountDb(DatabaseBase):
     # Per quota window: usage last observed by the quota refresher and how much of it other (non-spare-capacity)
     # users caused. Maintained by utils/spare_capacity.observe.
     spare_capacity_tracking_json = Column(Text, nullable=False, default="{}", server_default="{}")
-    # Per quota window: each user's share of it, credited from usage growth. Maintained by utils/quota_attribution.observe.
+    # Per quota window: each user's and API key's share of it, credited from usage growth.
+    # Maintained by utils/quota_attribution.observe.
     quota_attribution_json = Column(Text, nullable=False, default="{}", server_default="{}")
     created_at = Column(DateTime(timezone=True), nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=False)
@@ -125,18 +130,20 @@ class UserDb(DatabaseBase):
     rate_limit_per_minute = Column(Integer, nullable=True)
     rate_limit_per_hour = Column(Integer, nullable=True)
     rate_limit_per_day = Column(Integer, nullable=True)
-    # token cap per calendar month across all the user's keys; null/0 = unlimited (no global default for users).
+    # Retired token and USD budgets. The columns stay so an older release can still run against this schema.
     monthly_token_budget = Column(BigInteger, nullable=True)
-    # Lifetime (one-time) cap across the user's retained usage history.
     lifetime_token_budget = Column(BigInteger, nullable=True)
-    # API-equivalent USD spend caps across all keys; null/0 means unlimited.
     monthly_spend_budget_usd = Column(Float, nullable=True)
     lifetime_spend_budget_usd = Column(Float, nullable=True)
+    # Limit budgets across all the user's keys: the user's share of the accounts' open 5-hour / weekly windows,
+    # summed across accounts (1.0 = one account's full window). Null or 0 means no cap.
+    five_hour_limit_budget = Column(Float, nullable=True)
+    weekly_limit_budget = Column(Float, nullable=True)
     # Explicit Claude thinking effort levels this user may request. Requests without an explicit effort are allowed.
     allowed_thinking_levels = Column(
         ARRAY(VARCHAR),
         nullable=False,
-        default=lambda: list(THINKING_LEVELS),
+        default=lambda: list(thinking_levels()),
         server_default="{low,medium,high,max}",
     )
     # Requested model ID -> upstream model ID, scoped to this user.
@@ -238,7 +245,10 @@ class ApiKeyDb(DatabaseBase):
     key_hash = Column(VARCHAR, nullable=False)
     active = Column(Boolean, nullable=False)
     rate_limit_per_minute = Column(Integer, nullable=True)  # max requests/min for this key; null = global default
-    monthly_token_budget = Column(BigInteger, nullable=True)  # token cap per calendar month; null = unlimited
+    monthly_token_budget = Column(BigInteger, nullable=True)  # retired; kept for schema compatibility
+    # Limit budgets for this key alone, in the same units as the user's. Null or 0 means no cap.
+    five_hour_limit_budget = Column(Float, nullable=True)
+    weekly_limit_budget = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False)
     last_used_at = Column(DateTime(timezone=True), nullable=True)
 

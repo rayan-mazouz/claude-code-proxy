@@ -12,7 +12,7 @@
 #
 # The script is safe to re-run. `install` on a server that already has an
 # installation behaves like `update`: it backs up the database first and keeps
-# the existing settings in .env, apart from the model allowlist (see below).
+# every value already set in .env (see the model allowlist note below).
 #
 # Optional overrides. A fresh install applies all of them (with the defaults
 # below); on an existing installation only the ones you set change:
@@ -23,13 +23,20 @@
 #   CCP_BIND_ADDRESS   Host IPv4 address to bind, e.g. a VPN interface IP (default: 0.0.0.0)
 #   CCP_DOMAIN         Hostname used in dashboard links (default: localhost)
 #   CCP_ALLOWED_MODELS Comma-separated model allowlist, or "default"
-#                      (default: claude-opus-5-5,claude-opus-4-8,claude-opus-4-7,claude-sonnet-5-5,claude-haiku-5-5)
+#                      (default: claude-fable-5-2,claude-opus-5-5,claude-opus-4-8,claude-opus-4-7,claude-sonnet-5-5,claude-haiku-5-5)
 #
-# The model allowlist is the one exception to keeping .env as it is: every
-# install and update sets ALLOWED_MODELS to the default list of the revision
-# being deployed, so new models arrive with the update. A list passed through
-# CCP_ALLOWED_MODELS is recorded and kept across updates instead;
+# Existing values in .env are never overwritten; only missing ones are filled
+# in. The model allowlist follows the default list of the revision being
+# deployed only while it is untouched: when ALLOWED_MODELS still equals the
+# default list this script last wrote (recorded in ${STATE_FILE}), an update
+# replaces it with the new default so new models arrive with the update. Once
+# you change it (in .env or on the dashboard Settings page) it is kept as is.
+# A list passed through CCP_ALLOWED_MODELS is written as given;
 # CCP_ALLOWED_MODELS=default goes back to following the default list.
+#
+# .env is owned by ${APP_USER} and group-writable (mode 0660) by the host
+# group that the containers' appuser (gid 10001) maps to under rootless
+# Docker, so the dashboard Settings page can save changes to it.
 #
 # The checkout is never edited: server-specific Compose changes live in
 # ${OVERRIDE_FILE}, and all settings live in the checkout's ignored .env.
@@ -55,13 +62,20 @@ DEFAULT_REPO_URL="https://github.com/rayan-mazouz/claude-code-proxy.git"
 DEFAULT_HTTP_PORT=18437
 DEFAULT_BIND_ADDRESS="0.0.0.0"
 DEFAULT_DOMAIN="localhost"
-DEFAULT_ALLOWED_MODELS="claude-opus-5-5,claude-opus-4-8,claude-opus-4-7,claude-sonnet-5-5,claude-haiku-5-5"
+DEFAULT_ALLOWED_MODELS="claude-fable-5-2,claude-opus-5-5,claude-opus-4-8,claude-opus-4-7,claude-sonnet-5-5,claude-haiku-5-5"
+# The default list shipped before the script recorded which default it applied. An installation without a record
+# whose allowlist still equals this list was never customised, so it may follow the new default.
+PREVIOUS_DEFAULT_ALLOWED_MODELS="claude-opus-5-5,claude-opus-4-8,claude-opus-4-7,claude-sonnet-5-5,claude-haiku-5-5"
+# The backend image's appuser (backend/Dockerfile); its group gets write access to .env.
+CONTAINER_APP_GID=10001
 
 REPO_URL="${CCP_REPO_URL:-${DEFAULT_REPO_URL}}"
 REPO_BRANCH="${CCP_REPO_BRANCH:-main}"
-# Model list chosen by the operator; empty means ALLOWED_MODELS follows the default list.
+# Model list chosen through CCP_ALLOWED_MODELS (on this or an earlier run); empty means none was.
 PINNED_MODELS="${CCP_ALLOWED_MODELS:-}"
 [[ "${PINNED_MODELS}" == default ]] && PINNED_MODELS=""
+# The default model list this script last wrote to ALLOWED_MODELS (recorded in the state file).
+APPLIED_DEFAULT_MODELS=""
 
 APPARMOR_PROFILE="/etc/apparmor.d/usr.bin.rootlesskit"
 DOCKER_PACKAGES=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras)
@@ -227,11 +241,21 @@ stack_running() {
         compose ps --status running --services 2>/dev/null | grep -qx postgres
 }
 
+# The last KEY=value in .env, without one layer of surrounding quotes (the
+# dashboard quotes values that contain spaces, # or $).
 env_get() {
-    local key="$1" file="${APP_DIR}/.env"
+    local key="$1" file="${APP_DIR}/.env" value single="^'(.*)'$" double='^"(.*)"$'
 
     [[ -f "${file}" ]] || return 0
-    sed -n "s/^${key}=//p" "${file}" | tail -n 1
+    value="$(sed -n "s/^${key}=//p" "${file}" | tail -n 1)"
+    if [[ "${value}" =~ ${single} || "${value}" =~ ${double} ]]; then
+        value="${BASH_REMATCH[1]}"
+    fi
+    printf '%s\n' "${value}"
+}
+
+env_has() {
+    [[ -f "${APP_DIR}/.env" ]] && grep -q "^$1=" "${APP_DIR}/.env"
 }
 
 # Replace KEY=... in place (or append it) without interpreting the value.
@@ -239,17 +263,23 @@ set_env_value() {
     local key="$1" value="$2" file="${APP_DIR}/.env" tmp
 
     tmp="$(mktemp)"
-    KEY="${key}" VALUE="${value}" awk '
-        BEGIN { done = 0 }
-        index($0, ENVIRON["KEY"] "=") == 1 {
-            if (!done) { print ENVIRON["KEY"] "=" ENVIRON["VALUE"]; done = 1 }
-            next
-        }
-        { print }
-        END { if (!done) print ENVIRON["KEY"] "=" ENVIRON["VALUE"] }
-    ' "${file}" >"${tmp}"
-    # Rewrite in place so the file keeps its owner and 0600 mode.
-    cat "${tmp}" >"${file}"
+    # Hold the same exclusive flock the backend's Settings page takes, from reading to rewriting, so a dashboard
+    # save and this rewrite never interleave. Rewrite in place so the file keeps its inode (the containers
+    # bind-mount it), owner, group and mode. fd 8: fd 9 is this script's own run lock.
+    # shellcheck disable=SC2094 # fd 8 only holds the lock; the file is read fully into ${tmp} before it is rewritten.
+    {
+        flock -x 8
+        KEY="${key}" VALUE="${value}" awk '
+            BEGIN { done = 0 }
+            index($0, ENVIRON["KEY"] "=") == 1 {
+                if (!done) { print ENVIRON["KEY"] "=" ENVIRON["VALUE"]; done = 1 }
+                next
+            }
+            { print }
+            END { if (!done) print ENVIRON["KEY"] "=" ENVIRON["VALUE"] }
+        ' "${file}" >"${tmp}"
+        cat "${tmp}" >"${file}"
+    } 8<"${file}"
     rm -f "${tmp}"
 }
 
@@ -278,6 +308,7 @@ load_state() {
         value="$(sed -n 's/^ALLOWED_MODELS=//p' "${STATE_FILE}" | tail -n 1)"
         [[ -n "${value}" ]] && PINNED_MODELS="${value}"
     fi
+    APPLIED_DEFAULT_MODELS="$(sed -n 's/^ALLOWED_MODELS_DEFAULT=//p' "${STATE_FILE}" | tail -n 1)"
     return 0
 }
 
@@ -291,6 +322,7 @@ APP_DIR=${APP_DIR}
 REPO_URL=${REPO_URL}
 REPO_BRANCH=${REPO_BRANCH}
 ALLOWED_MODELS=${PINNED_MODELS}
+ALLOWED_MODELS_DEFAULT=${APPLIED_DEFAULT_MODELS}
 DOCKER_INSTALLED_BY_SCRIPT=${DOCKER_INSTALLED_BY_SCRIPT}
 EOF
     chmod 0600 "${STATE_FILE}"
@@ -575,9 +607,70 @@ checkout_default_models() {
     fi
 }
 
+# The host group that container gid ${CONTAINER_APP_GID} maps to: rootless Docker
+# maps container ID N (N >= 1) to the user's subordinate range start + N - 1.
+container_app_gid_on_host() {
+    local start count
+
+    IFS=: read -r _ start count < <(grep -E "^(${APP_USER}|$(get_uid)):" /etc/subgid 2>/dev/null | head -n 1) || return 1
+    [[ "${start}" =~ ^[0-9]+$ && "${count}" =~ ^[0-9]+$ ]] || return 1
+    ((CONTAINER_APP_GID <= count)) || return 1
+    echo "$((start + CONTAINER_APP_GID - 1))"
+}
+
+# Owner ${APP_USER}; group = the containers' appuser, so the backend can save
+# dashboard Settings changes; nobody else can read it.
+secure_env_file() {
+    local env_file="${APP_DIR}/.env" gid
+
+    chown "${APP_USER}:${APP_USER}" "${env_file}"
+    if gid="$(container_app_gid_on_host)"; then
+        chgrp "${gid}" "${env_file}"
+        chmod 0660 "${env_file}"
+    else
+        chmod 0600 "${env_file}"
+        warn "No subordinate GID range for ${APP_USER}; .env stays 0600 and the dashboard Settings page is read-only."
+    fi
+}
+
+# ALLOWED_MODELS is kept unless it is missing or still equals a default list
+# this script wrote; then it follows the default of the deployed revision.
+configure_models() {
+    local fresh="$1" default current untouched=0
+    default="$(checkout_default_models)"
+    current="$(env_get ALLOWED_MODELS)"
+
+    if [[ -n "${CCP_ALLOWED_MODELS:-}" ]]; then
+        if [[ "${CCP_ALLOWED_MODELS}" == default ]]; then
+            set_env_value ALLOWED_MODELS "${default}"
+            APPLIED_DEFAULT_MODELS="${default}"
+        else
+            set_env_value ALLOWED_MODELS "${CCP_ALLOWED_MODELS}"
+            APPLIED_DEFAULT_MODELS=""
+        fi
+        return
+    fi
+
+    if ((fresh)) || ! env_has ALLOWED_MODELS || [[ "${current}" == "${default}" ]]; then
+        untouched=1
+    elif [[ -n "${APPLIED_DEFAULT_MODELS}" ]]; then
+        [[ "${current}" == "${APPLIED_DEFAULT_MODELS}" ]] && untouched=1
+    elif [[ -z "${PINNED_MODELS}" && "${current}" == "${PREVIOUS_DEFAULT_ALLOWED_MODELS}" ]]; then
+        untouched=1
+    fi
+
+    if ((untouched)); then
+        [[ "${current}" == "${default}" ]] || log "Updating ALLOWED_MODELS to this revision's default list."
+        set_env_value ALLOWED_MODELS "${default}"
+        APPLIED_DEFAULT_MODELS="${default}"
+    else
+        log "Keeping the customised ALLOWED_MODELS."
+    fi
+}
+
 # Create .env when missing, generate any missing secret, fill in settings that
-# are not set yet, and set the model allowlist. Other existing values are never
-# replaced here; explicit CCP_* overrides are applied by apply_env_overrides.
+# are not set yet, and update an untouched model allowlist. Existing values are
+# never replaced here; explicit CCP_* overrides are applied by apply_env_overrides.
 configure_env() {
     local env_file="${APP_DIR}/.env" fresh=0
 
@@ -589,8 +682,7 @@ configure_env() {
             : >"${env_file}"
         fi
     fi
-    chown "${APP_USER}:${APP_USER}" "${env_file}"
-    chmod 0600 "${env_file}"
+    secure_env_file
 
     local key value
     for key in JWT_SECRET ADMIN_PASSWORD; do
@@ -598,8 +690,15 @@ configure_env() {
         is_unset_secret "${value}" && set_env_value "${key}" "$(generate_secret)"
     done
 
-    # An empty key means the backend never started, so nothing is encrypted with it yet.
-    is_unset_secret "$(env_get FERNET_KEY)" && set_env_value FERNET_KEY "$(generate_fernet_key)"
+    # Only a fresh database can get a new key: with an existing one, a new key would make every stored OAuth
+    # token unreadable, so leave it for the operator to restore the original.
+    if is_unset_secret "$(env_get FERNET_KEY)"; then
+        if postgres_volume_exists; then
+            warn "FERNET_KEY is empty but the database already exists; leaving it unchanged. Restore the original key in ${env_file}: a new key cannot decrypt the stored OAuth tokens."
+        else
+            set_env_value FERNET_KEY "$(generate_fernet_key)"
+        fi
+    fi
 
     # Postgres only reads its password when the volume is first initialised.
     value="$(env_get POSTGRES_PASSWORD)"
@@ -633,7 +732,7 @@ configure_env() {
     default_env_value POSTGRES_DB claude_code_proxy
     default_env_value ADMIN_USERNAME admin
 
-    set_env_value ALLOWED_MODELS "${PINNED_MODELS:-$(checkout_default_models)}"
+    configure_models "${fresh}"
 
     apply_env_overrides
     write_credentials

@@ -102,14 +102,28 @@ sudo ./server-install.sh backup     # on-demand database and .env backup
 sudo ./server-install.sh status
 ```
 
-Re-running `install` on an existing server updates it in place and keeps its
-settings. The model allowlist is the exception: every install and update sets
-`ALLOWED_MODELS` to the default list of the deployed revision, so new models
-arrive with the update. Pass `CCP_ALLOWED_MODELS=model-a,model-b` to choose your
-own list (it is kept across later updates), or `CCP_ALLOWED_MODELS=default` to
-follow the default list again. The admin credentials are written to
-`/root/claude-code-proxy-admin.txt`. Updates restart containers in place;
-use the blue-green flow below when you need zero-downtime rollouts.
+Re-running `install` on an existing server updates it in place and never
+overwrites a value already set in `.env`; it only fills in missing ones. The
+model allowlist follows the default list of the deployed revision only while it
+is untouched: when `ALLOWED_MODELS` still equals the default the script last
+wrote (recorded in `/etc/claude-code-proxy/rootless.conf`), an update replaces
+it with the new default so new models arrive with the update. Once you change
+it, by hand or on the dashboard [Settings](#settings) page, it is kept. Pass
+`CCP_ALLOWED_MODELS=model-a,model-b` to set a list explicitly, or
+`CCP_ALLOWED_MODELS=default` to go back to following the default list. The
+admin credentials are written to `/root/claude-code-proxy-admin.txt`. Updates
+restart containers in place; use the blue-green flow below when you need
+zero-downtime rollouts.
+
+The script keeps `.env` owned by `claudeproxy` with mode `0660` and its group
+set to the host subgid that the containers' `appuser` (gid 10001) maps to under
+rootless Docker (the start of `claudeproxy`'s `/etc/subgid` range + 10000), so
+the backend can save Settings changes; every `install` and `update` re-applies
+this.
+
+Upgrading from a release that predates the Settings page: download the script
+again before running `update` (the copy you saved earlier still sets `.env` to
+mode `0600`, which leaves the page read-only), or simply run `update` twice.
 
 ### Optional macOS menu-bar app
 
@@ -162,18 +176,36 @@ are the bottleneck now (pun intended).
 - User priorities and bulk priority assignment, independent of account priority.
 - Per-user fallback opt-in (off by default), model allowlists, exact model
   rewrites, thinking levels, request modes, and access policies.
-- Per-user monthly/lifetime token and spend budgets, plus per-key request/token
-  limits and revocation.
+- Limit budgets per user (across all their keys) and per API key: a cap on the
+  share of the accounts' 5-hour and weekly limits, in percent of one account's
+  window summed across accounts (200% = two full accounts). A capped user or key
+  gets HTTP 429 with `Retry-After` until enough of the windows reset. Shares are
+  credited when the quota refresher probes an account, so traffic sent between
+  two probes can overshoot a budget slightly. Keys also keep per-key request
+  rate limits and revocation. (The former token and USD budgets are retired;
+  their database columns are kept only so an older release can still start.)
 - Spare-capacity users (off by default): they are only routed to accounts with
   quota left after reserving what everyone else is on pace to use in the
   current 5-hour and weekly windows, and get HTTP 429 otherwise. Everyone
   else's usage is measured from the accounts' real usage, so it includes use
   outside the proxy (e.g. claude.ai on the same account).
-- The **Users** page shows usage as cost or as each user's share of the
-  accounts' current 5-hour, weekly and monthly windows (summed across accounts,
-  so 100% is one account's full limit). Each quota probe splits a window's
-  growth by the proxy cost each user caused on that account in the interval;
-  growth with no proxy traffic is use outside the proxy and is not counted.
+- The **Users** page shows usage as each user's share of the accounts' current
+  5-hour, weekly and monthly windows by default (summed across accounts, so
+  100% is one account's full limit), broken down by account or by API key, with
+  the limit budget alongside; a toggle switches to cost. Each quota probe splits
+  a window's growth by the proxy cost each user and key caused on that account
+  in the interval; growth with no proxy traffic is use outside the proxy and is
+  not counted.
+- Current Max plans have no 5-hour limit: the usage probe reports
+  `"five_hour": null`. Such accounts keep no 5-hour state, are never blocked or
+  warmed on it, report "No 5-hour limit" in the dashboard, and are left out of
+  the 5-hour pool average and the status line's 5h bar. Model-scoped weekly
+  allowances the probe reports (for example the Fable share of the weekly limit)
+  are stored per account; a request for that model family skips accounts whose
+  allowance is at the weekly rotation threshold.
+- `THINKING_LEVELS` (default `low,medium,high,max`) lists the effort levels the
+  proxy recognizes and the dashboard offers for users and presets. Add `xhigh`
+  to make it selectable; a request naming a level outside the list is refused.
 - Hashed API keys and Fernet-encrypted OAuth/fallback credentials.
 
 ### Team access
@@ -200,13 +232,16 @@ Sonnet, Haiku, Opus, and Fable families:
 | --- | --- |
 | `claude-fable-5` | Fable |
 | `claude-fable-5-1` | Fable |
+| `claude-fable-5-2` | Fable |
 | `claude-haiku-4-5-20251001` | Haiku |
+| `claude-haiku-5-5` | Haiku |
 | `claude-opus-4-6` | Opus |
 | `claude-opus-4-7` | Opus |
 | `claude-opus-4-8` | Opus |
 | `claude-opus-5` | Opus |
 | `claude-opus-5-5` | Opus |
 | `claude-sonnet-5` | Sonnet |
+| `claude-sonnet-5-5` | Sonnet |
 
 Exact model rewrites are rendered in events as `target (requested)`.
 
@@ -233,7 +268,14 @@ opt-in. Fallback is disabled for every user by default.
 
 The overview combines pool health, request volume, token and cost totals, and
 reusable controls for automatic refresh, manual refresh, local-calendar date
-ranges, user selection, and model selection. Times use the viewer's local
+ranges, user selection, and model selection. A pool strip counts usable
+accounts, accounts at a limit or cooling down, the weekly headroom left before
+each account's threshold, accounts without a 5-hour limit, accounts whose model
+allowance is used up, and budgets reached. **Usage & limits** switches between
+the pool averages and a per-account table (5-hour, weekly and model-scoped
+windows, how much of each came through the proxy, and the account state).
+**Limit usage** lists each user's or key's share of the open windows against
+their limit budget, with a per-account split. Times use the viewer's local
 timezone and a consistent 12-hour format. Token values use compact `K`, `M`, or
 `B` notation.
 
@@ -269,7 +311,7 @@ user's API keys. Zero or blank disables a limit.
 
 Users use the same card language as accounts. Cards show priority, active state,
 request mode, thinking levels, allowed models, model rewrites, API-key count,
-all-time and current-month tokens/spend, and budgets. Drag-and-drop lanes and
+all-time and current-month tokens/spend, and limit budgets. Drag-and-drop lanes and
 bulk assignment make priority changes explicit; saving is atomic.
 
 ### Events and request history
@@ -348,12 +390,94 @@ repeat cooldowns. A persistent outbox worker keeps Telegram latency out of the
 inference path. Account, pool, user/key guardrail, and daily, weekly, and
 monthly report events are supported.
 
+### Settings
+
+The owner (the `ADMIN_USERNAME` login) gets a **Settings** page that shows and
+edits every known configuration key, grouped by area, with the help text from
+`.env.example`. Keys in `.env` that the dashboard does not know are listed
+read-only under **Other** (values masked when the name contains `TOKEN`,
+`SECRET`, `PASS`, `KEY` or `CREDENTIAL`). Team members cannot be granted it:
+it can change the owner password and secrets. Changing a Security, Database or
+Egress key, or any secret, also asks for the current owner password. Saving
+validates the whole
+candidate configuration first (types, ranges, JSON, the secret guards) and
+reports problems per field (Compose values such as ports, the bind address,
+`DOMAIN`, `ACME_EMAIL` and `ARCHIVE_BORG_HOST_DIR` get the same checks as the
+installer's `CCP_*` overrides); it then rewrites the file **in place** under a
+lock, keeping comments, blank lines and key order, and appends keys that were
+not in the file yet. The new size is reserved before the file is truncated, so
+a full disk fails without touching it, and the previous text is copied to
+`.env.bak` (mode 0600) when the file's directory is writable (not inside the
+containers). Changed key names (never values) are logged.
+
+Each key carries an apply badge:
+
+- **Live** -- read on every use; running processes pick it up within about two
+  seconds.
+- **Restart** -- captured when a process starts (database pool, log level,
+  egress targets and relay credentials, the S3 archive client). The page lists
+  saved-but-not-applied keys and offers **Restart backend**, which sends
+  `SIGHUP` to the gunicorn master for a graceful rolling restart of the
+  workers. The quota refresher, notification dispatcher and archive retention
+  sidecars notice the change and exit cleanly, and Docker's
+  `restart: unless-stopped` starts them again with the new values.
+- **Redeploy** -- consumed by Docker Compose itself (`HTTP_PORT`, `HTTPS_PORT`,
+  `HTTP_BIND_ADDRESS`, `DOMAIN` in the Traefik rules, `TRAEFIK_ENTRYPOINT`,
+  `ACME_EMAIL`, `ARCHIVE_BORG_HOST_DIR`, the egress relay's ports and hosts).
+  These apply on the next `sudo scripts/server-install.sh update` or
+  `docker compose up -d`.
+
+The egress relay is a separate Compose project that reads `EGRESS_TARGETS_JSON`,
+`EGRESS_RELAY_USERNAME`, `EGRESS_RELAY_TOKEN`, `EGRESS_RELAY_ALLOWED_HOSTS` and
+`EGRESS_RELAY_HEALTH_PORT` only when it starts. After changing one, the page
+also asks you to run `docker compose -f docker-compose.egress.yml up -d`.
+
+A bad value for a Restart key that the validation cannot catch (an S3 endpoint
+or bucket that does not answer, an unreachable egress relay) can make the
+restarted backend fail to serve. To recover, fix the value in `.env` with an
+editor that writes in place (see below) and restart the backend container
+(`docker restart <backend container>`, or `sudo scripts/server-install.sh
+update`); the file outranks the container environment, so the fixed value
+applies on that restart.
+
+Secrets (`ADMIN_PASSWORD`, `EGRESS_RELAY_TOKEN`, the archive S3 keys) are never
+sent to the browser: the page shows *Set* / *Not set* and a field to replace
+them; the optional ones (`EGRESS_RELAY_TOKEN`, the archive S3 keys) can also be
+cleared. `FERNET_KEY`, `JWT_SECRET` and the database connection
+(`POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`,
+`POSTGRES_PASSWORD`) are read-only there, because changing them breaks stored
+tokens, sessions or the database login, and moving the database is a
+redeploy; edit `.env` by hand if you really must. The installer never
+generates a new `FERNET_KEY` once the database volume exists.
+
+How it works: Compose bind-mounts `./.env` at `/app/config/.env` in every
+backend-image container (read-write only for `backend`) and sets
+`CCP_CONFIG_FILE` to it. Values in that file take precedence over the container
+environment, which Compose froze from `env_file` when it created the
+container; without `CCP_CONFIG_FILE` the repo-root `.env` is used. Because the
+file is a single-file bind mount, it must be writable in place by the image's
+`appuser` (uid/gid 10001): the single-server script sets this up; elsewhere use
+e.g. `sudo chgrp 10001 .env && sudo chmod 0660 .env` with rootful Docker. When
+the backend cannot read or write the file the page says so and stays
+read-only; a file that cannot be read is never treated as empty (the backend
+keeps its current settings, or starts from the container environment).
+Values are quoted so python-dotenv and Compose read them identically; values
+with line breaks, backslashes or `${` are refused.
+
+Edit `.env` **in place** only: through the dashboard, `server-install.sh`, or
+an editor that overwrites the existing file (for example `vim` with
+`backupcopy=yes`, or `cat new > .env`). Tools that write a new file and rename
+it over the old one (`sed -i`, many editors' "safe save") leave every
+container's single-file bind mount pointing at the old file until the next
+`update`, and the new file must keep the group and mode the installer set
+(group 10001 or its rootless subgid, mode 0660).
+
 ## Request lifecycle
 
 ```text
 client key
    │
-   ├─ authenticate user/key and enforce rate/token/spend budgets
+   ├─ authenticate user/key and enforce rate limits and limit budgets
    ├─ apply allowlist and exact model rewrite
    ├─ choose highest-priority eligible user lane
    ├─ choose highest-priority account with a free concurrency lane
@@ -405,8 +529,9 @@ shows the active cache countdown and pooled usage.
 
 ## Configuration
 
-Copy `.env.example` for the complete annotated list. The most important values
-are:
+Copy `.env.example` for the complete annotated list; once running, the owner
+can edit it from the dashboard [Settings](#settings) page. The most important
+values are:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -423,6 +548,8 @@ are:
 | `ARCHIVE_ENABLED` | `false` | Store exact request/response bodies in S3-compatible storage |
 | `ARCHIVE_REQUIRED` | `true` | Fail closed when a required archive write fails |
 | `WARMUP_ENABLED` | `true` | Enable demand-triggered/manual warm-up |
+| `ALLOWED_MODELS` | built-in list | Model catalog; the built-in list includes `claude-fable-5-2` |
+| `THINKING_LEVELS` | `low,medium,high,max` | Effort levels the proxy accepts and the dashboard offers (add `xhigh` to enable it) |
 | `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | `5` / `10` | Database connections per process; keep workers × (size + overflow) under PostgreSQL's `max_connections` |
 | `DB_POOL_TIMEOUT_SECONDS` | `30` | How long a request waits for a free database connection |
 

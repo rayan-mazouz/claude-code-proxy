@@ -36,6 +36,8 @@ export interface OverviewStats {
     // Pool inventory — not range-dependent.
     total_accounts: number;
     active_accounts: number;
+    // Active accounts that still have a 5-hour window (current Max plans only have weekly limits).
+    five_hour_limited_accounts: number;
     usable_accounts: number;
     total_reset_credits_available: number | null;
     five_hour_average_pct: number;
@@ -247,6 +249,10 @@ export interface Account {
     weekly_reset_at: string | null;
     monthly_used_pct: number | null;
     monthly_reset_at: string | null;
+    // False for plans without a 5-hour window (current Max plans); session_* are then null.
+    has_five_hour_limit: boolean;
+    // Model-scoped weekly allowances, e.g. the share of the weekly limit Fable models may use.
+    scoped_limits: ScopedLimit[];
     cooldown_until: string | null;
     last_used_at: string | null;
     created_at: string;
@@ -304,8 +310,11 @@ export interface AnthropicFallback {
 
 // Users + API keys -----------------------------------------------------------
 
-export const THINKING_LEVELS = ["low", "medium", "high", "max"] as const;
-export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+// Every effort level the API accepts, lowest first. The proxy's THINKING_LEVELS setting picks the offered subset
+// (see useThinkingLevels); DEFAULT_THINKING_LEVELS mirrors its default.
+export const KNOWN_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+export const DEFAULT_THINKING_LEVELS: ThinkingLevel[] = ["low", "medium", "high", "max"];
+export type ThinkingLevel = string;
 export type ThinkingMode = "disabled" | "enabled" | "adaptive";
 
 export interface Preset {
@@ -334,11 +343,8 @@ export interface User {
     rate_limit_per_minute: number | null;
     rate_limit_per_hour: number | null;
     rate_limit_per_day: number | null;
-    // tokens/calendar month across all the user's keys; null/0 = unlimited.
-    monthly_token_budget: number | null;
-    lifetime_token_budget: number | null;
-    monthly_spend_budget_usd: number | null;
-    lifetime_spend_budget_usd: number | null;
+    // Caps on the user's share of the accounts' 5-hour / weekly limits across all keys.
+    limit_budget: LimitBudget;
     model_overrides: Record<string, string>;
     // Explicit Claude effort levels this user may request.
     allowed_thinking_levels: ThinkingLevel[];
@@ -358,7 +364,9 @@ export interface User {
     monthly_spend_usd: number;
     // Share of each provider quota window, summed across accounts (1 = one account's full window).
     // Null when no account currently has that window open.
-    quota_usage: Record<QuotaWindowKey, QuotaShare | null>;
+    quota_usage: QuotaUsage;
+    // The same shares per account, most used first.
+    quota_usage_by_account: AccountQuotaUsage[];
 }
 
 export type QuotaWindowKey = "five_hour" | "weekly" | "monthly";
@@ -366,6 +374,67 @@ export type QuotaWindowKey = "five_hour" | "weekly" | "monthly";
 export interface QuotaShare {
     used_pct: number;
     reset_at: string | null;
+}
+
+export type QuotaUsage = Record<QuotaWindowKey, QuotaShare | null>;
+
+export interface AccountQuotaUsage extends QuotaUsage {
+    account_id: string;
+    account_label: string;
+}
+
+// Share of the accounts' windows, summed across accounts (1 = one account's full window). Null = no cap.
+export interface LimitBudget {
+    five_hour: number | null;
+    weekly: number | null;
+}
+
+export interface ScopedLimit {
+    model: string;
+    used_pct: number | null;
+    reset_at: string | null;
+    active: boolean;
+    // Requests for this model family skip the account until the allowance resets.
+    exhausted: boolean;
+}
+
+export interface AccountLimitWindow {
+    used_pct: number | null;
+    reset_at: string | null;
+    threshold: number;
+}
+
+export interface AccountLimits {
+    id: string;
+    label: string;
+    tier: string | null;
+    status: AccountStatus;
+    usable: boolean;
+    has_five_hour_limit: boolean;
+    five_hour: AccountLimitWindow | null;
+    weekly: AccountLimitWindow;
+    monthly: AccountLimitWindow | null;
+    scoped: ScopedLimit[];
+    cooldown_until: string | null;
+    // How much of each window the proxy's users caused (the rest happened outside the proxy).
+    proxy_share: QuotaUsage;
+}
+
+export interface OwnerLimitUsage {
+    id: string;
+    name: string;
+    user_id: string | null;
+    user_name: string | null;
+    active: boolean;
+    usage: QuotaUsage;
+    by_account: AccountQuotaUsage[];
+    budget: LimitBudget;
+}
+
+export interface LimitsReport {
+    accounts: AccountLimits[];
+    users: OwnerLimitUsage[];
+    keys: OwnerLimitUsage[];
 }
 
 export interface ApiKey {
@@ -376,8 +445,10 @@ export interface ApiKey {
     active: boolean;
     // requests/min: null = use the server default; 0 = unlimited.
     rate_limit_per_minute: number | null;
-    // tokens/calendar month: null/0 = unlimited.
-    monthly_token_budget: number | null;
+    // Caps for this key alone, in the same units as the user's.
+    limit_budget: LimitBudget;
+    quota_usage: QuotaUsage;
+    quota_usage_by_account: AccountQuotaUsage[];
     last_used_at: string | null;
     created_at: string;
 }
@@ -423,5 +494,6 @@ export interface DashboardAnalytics {
     hourly: HourlyResponse;
     model_mix: ModelMixResponse | null;
     thinking_level_mix: ThinkingLevelMixResponse | null;
+    limits: LimitsReport | null;
     lookups: { users: UserLookup[]; models: string[] };
 }

@@ -2,19 +2,23 @@
 
 // ---------------------------------------------------------------------------
 // Users page: each user owns one or more API keys. Create/edit/delete users,
-// set per-user rate limits and token budgets, manage their keys (one-time
-// secret reveal with shell + settings.json setup), and see usage as cost or as a
-// share of the accounts' 5-hour, weekly and monthly quota windows.
+// set per-user rate limits and limit budgets, manage their keys (one-time
+// secret reveal with shell + settings.json setup), and see usage as a share of
+// the accounts' 5-hour, weekly and monthly limits (per account or per key) or as cost.
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useState } from "react";
 import { Check, ChevronRight, KeyRound, ListChecks, Pencil, Search, Trash2 } from "lucide-react";
 import { api, API_BASE_URL, ApiError } from "@/lib/api";
 import { useStoredState } from "@/lib/useStoredState";
+import { useThinkingLevels } from "@/lib/useThinkingLevels";
 import {
+    AccountQuotaUsage,
     ApiKey,
+    LimitBudget,
+    OwnerLimitUsage,
+    QuotaUsage as QuotaUsageShares,
     QuotaWindowKey,
-    THINKING_LEVELS,
     ThinkingLevel,
     ThinkingMode,
     User,
@@ -61,11 +65,69 @@ function parseLimitInput(value: string): number | null {
     return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
 }
 
-function parseMoneyInput(value: string): number | null {
+// A limit budget is typed as a percentage of one account's window; the API takes a fraction.
+function parsePercentInput(value: string): number | null {
     const trimmed = value.trim();
     if (trimmed === "") return null;
     const n = Number(trimmed);
-    return Number.isFinite(n) && n >= 0 ? n : null;
+    return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 10000 : null;
+}
+
+function percentInput(fraction: number | null | undefined): string {
+    return fraction ? String(Math.round(fraction * 10000) / 100) : "";
+}
+
+function formatShare(fraction: number): string {
+    const percent = fraction * 100;
+    return `${percent >= 10 || percent === 0 ? percent.toFixed(0) : percent.toFixed(1)}%`;
+}
+
+function LimitBudgetFields({
+    fiveHour,
+    weekly,
+    onFiveHour,
+    onWeekly,
+    scope,
+}: {
+    fiveHour: string;
+    weekly: string;
+    onFiveHour: (value: string) => void;
+    onWeekly: (value: string) => void;
+    scope: string;
+}) {
+    return (
+        <div>
+            <div className="text-fog-300 mb-2 text-xs font-medium">Limit budget</div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Field label="5-hour budget (%)">
+                    <TextInput
+                        type="number"
+                        min={0}
+                        step="any"
+                        value={fiveHour}
+                        onChange={(event) => onFiveHour(event.target.value)}
+                        placeholder="No cap"
+                    />
+                </Field>
+                <Field label="Weekly budget (%)">
+                    <TextInput
+                        type="number"
+                        min={0}
+                        step="any"
+                        value={weekly}
+                        onChange={(event) => onWeekly(event.target.value)}
+                        placeholder="No cap"
+                    />
+                </Field>
+            </div>
+            <p className="text-fog-400 mt-1.5 text-xs">
+                {scope} may use at most this share of one account&apos;s 5-hour or weekly limit,
+                summed across accounts (200% = two full accounts). Requests are refused once it is
+                reached and allowed again as the windows reset. Blank or 0 means no cap. Accounts
+                without a 5-hour limit only count toward the weekly budget.
+            </p>
+        </div>
+    );
 }
 
 function UserRateLimitFields({
@@ -123,25 +185,20 @@ function UserRateLimitFields({
 }
 
 // Render the small "rate / budget" limit chips shared by users and keys.
-function LimitBadges({ rate, budget }: { rate: number | null; budget: number | null }) {
-    if (!rate && !budget) return null;
+function LimitBadges({ rate, budget }: { rate: number | null; budget: LimitBudget }) {
+    if (!rate && !budget.five_hour && !budget.weekly) return null;
     return (
         <span className="inline-flex flex-wrap gap-1.5">
             {rate ? <Badge tone="neutral">{formatNumber(rate)}/min</Badge> : null}
-            {budget ? <Badge tone="neutral">{formatTokens(budget)} tok/mo</Badge> : null}
+            {budget.five_hour ? (
+                <Badge tone="neutral">5h ≤ {formatShare(budget.five_hour)}</Badge>
+            ) : null}
+            {budget.weekly ? <Badge tone="neutral">7d ≤ {formatShare(budget.weekly)}</Badge> : null}
         </span>
     );
 }
 
 function MonthlyUsage({ user }: { user: User }) {
-    const hasBudget = (user.monthly_token_budget ?? 0) > 0;
-    const used = Math.max(0, user.monthly_tokens_used);
-    const budget = user.monthly_token_budget ?? 0;
-    const percentage = hasBudget ? Math.min(used / budget, 1) : 0;
-    const hasSpendBudget = (user.monthly_spend_budget_usd ?? 0) > 0;
-    const spendPercentage = hasSpendBudget
-        ? Math.min(user.monthly_spend_usd / (user.monthly_spend_budget_usd ?? 1), 1)
-        : 0;
     return (
         <div className="border-ink-700 bg-ink-900/45 mt-4 rounded-lg border p-4">
             <div className="grid gap-4 sm:grid-cols-2">
@@ -149,63 +206,42 @@ function MonthlyUsage({ user }: { user: User }) {
                     <div className="flex items-baseline justify-between gap-2">
                         <div className="text-fog-200 text-sm font-medium">Tokens this month</div>
                         <div className="text-fog-100 text-sm font-semibold tabular-nums">
-                            {formatTokens(used)}
-                            {hasBudget ? ` / ${formatTokens(budget)}` : ""}
+                            {formatTokens(Math.max(0, user.monthly_tokens_used))}
                         </div>
                     </div>
-                    <div className="text-fog-400 mt-0.5 text-xs">
-                        {hasBudget
-                            ? `${(percentage * 100).toFixed(1)}% of monthly limit used`
-                            : "No monthly limit set"}
-                    </div>
-                    {hasBudget ? (
-                        <div className="bg-ink-700 mt-3 h-2 overflow-hidden rounded-full">
-                            <div
-                                className={`h-full rounded-full transition-all ${percentage >= 0.9 ? "bg-bad-500" : percentage >= 0.7 ? "bg-warn-500" : "bg-brand-500"}`}
-                                style={{ width: `${percentage * 100}%` }}
-                            />
-                        </div>
-                    ) : null}
                 </div>
                 <div className="border-ink-700 sm:border-l sm:pl-4">
                     <div className="flex items-baseline justify-between gap-2">
                         <div className="text-fog-200 text-sm font-medium">Spend this month</div>
                         <div className="text-fog-100 text-sm font-semibold tabular-nums">
                             {formatUsd(user.monthly_spend_usd)}
-                            {hasSpendBudget
-                                ? ` / ${formatUsd(user.monthly_spend_budget_usd ?? 0)}`
-                                : ""}
                         </div>
                     </div>
-                    <div className="text-fog-400 mt-0.5 text-xs">
-                        {hasSpendBudget
-                            ? `${(spendPercentage * 100).toFixed(1)}% of monthly limit used`
-                            : "No monthly spend limit set"}
-                    </div>
-                    {hasSpendBudget ? (
-                        <div className="bg-ink-700 mt-3 h-2 overflow-hidden rounded-full">
-                            <div
-                                className={`h-full rounded-full transition-all ${spendPercentage >= 0.9 ? "bg-bad-500" : spendPercentage >= 0.7 ? "bg-warn-500" : "bg-brand-500"}`}
-                                style={{ width: `${spendPercentage * 100}%` }}
-                            />
-                        </div>
-                    ) : null}
+                    <div className="text-fog-400 mt-0.5 text-xs">API-equivalent value</div>
                 </div>
             </div>
             <div className="text-fog-400 mt-2 text-xs">
-                Resets {formatDateTime(user.monthly_reset_at)}
+                Month resets {formatDateTime(user.monthly_reset_at)}
             </div>
         </div>
     );
 }
 
 type UsageView = "cost" | "quota";
+type LimitsBreakdown = "account" | "key";
 
-const USAGE_VIEW_KEY = "users.usageView";
+// Versioned so the new Limits default applies even where an older choice was stored.
+const USAGE_VIEW_KEY = "users.usageView.v2";
+const LIMITS_BREAKDOWN_KEY = "users.limitsBreakdown";
 
 const USAGE_VIEW_OPTIONS: { value: UsageView; label: string }[] = [
-    { value: "cost", label: "Cost" },
     { value: "quota", label: "Limits %" },
+    { value: "cost", label: "Cost" },
+];
+
+const LIMITS_BREAKDOWN_OPTIONS: { value: LimitsBreakdown; label: string }[] = [
+    { value: "account", label: "By account" },
+    { value: "key", label: "By key" },
 ];
 
 const QUOTA_WINDOWS: { key: QuotaWindowKey; label: string; limit: string }[] = [
@@ -214,47 +250,169 @@ const QUOTA_WINDOWS: { key: QuotaWindowKey; label: string; limit: string }[] = [
     { key: "monthly", label: "Monthly", limit: "monthly limit" },
 ];
 
-// The user's share of the accounts' current provider windows, in percent of one account's limit.
-function QuotaUsage({ user }: { user: User }) {
+function shareTone(fraction: number): string {
+    return fraction >= 0.9 ? "bg-bad-500" : fraction >= 0.7 ? "bg-warn-500" : "bg-brand-500";
+}
+
+// One window's share as a bar: against the budget when one is set, else against one account's limit.
+function ShareBar({ share, budget }: { share: number; budget: number | null }) {
+    const scale = budget && budget > 0 ? budget : 1;
+    const fraction = Math.min(share / scale, 1);
+    return (
+        <div className="bg-ink-700 mt-2 h-1.5 overflow-hidden rounded-full">
+            <div
+                className={`h-full rounded-full transition-all ${shareTone(fraction)}`}
+                style={{ width: `${fraction * 100}%` }}
+            />
+        </div>
+    );
+}
+
+// Shares of the accounts' open windows, summed across accounts, with the limit budget if any.
+function QuotaTotals({ usage, budget }: { usage: QuotaUsageShares; budget: LimitBudget }) {
+    return (
+        <div className="grid gap-4 sm:grid-cols-3">
+            {QUOTA_WINDOWS.map(({ key, label, limit }, index) => {
+                const share = usage[key];
+                const cap = key === "monthly" ? null : budget[key];
+                return (
+                    <div
+                        key={key}
+                        className={index > 0 ? "border-ink-700 sm:border-l sm:pl-4" : ""}
+                    >
+                        <div className="flex items-baseline justify-between gap-2">
+                            <div className="text-fog-200 text-sm font-medium">{label}</div>
+                            <div className="text-fog-100 text-sm font-semibold tabular-nums">
+                                {share ? formatShare(share.used_pct) : "—"}
+                                {cap ? (
+                                    <span className="text-fog-400 font-normal">
+                                        {" "}
+                                        / {formatShare(cap)}
+                                    </span>
+                                ) : null}
+                            </div>
+                        </div>
+                        <div className="text-fog-400 mt-0.5 text-xs">
+                            {share
+                                ? `${cap ? "of budget" : `of one account's ${limit}`}${share.reset_at ? ` · ${formatCountdown(share.reset_at)}` : ""}`
+                                : cap
+                                  ? "Budget set · no window open"
+                                  : `No account has a ${limit} open`}
+                        </div>
+                        {share ? <ShareBar share={share.used_pct} budget={cap} /> : null}
+                    </div>
+                );
+            })}
+        </div>
+    );
+}
+
+function ShareCell({ share }: { share: AccountQuotaUsage[QuotaWindowKey] }) {
+    if (!share) return <span className="text-fog-500">—</span>;
+    return (
+        <span
+            className="tabular-nums"
+            title={share.reset_at ? formatCountdown(share.reset_at) : undefined}
+        >
+            {formatShare(share.used_pct)}
+        </span>
+    );
+}
+
+// Rows of shares: one per account (or per key), with the three windows as columns.
+function ShareTable({
+    rows,
+    emptyLabel,
+}: {
+    rows: { id: string; label: string; sublabel?: string; usage: QuotaUsageShares }[];
+    emptyLabel: string;
+}) {
+    if (rows.length === 0) return <div className="text-fog-400 text-xs">{emptyLabel}</div>;
+    return (
+        <div className="overflow-x-auto">
+            <table className="w-full min-w-[420px] text-left text-xs">
+                <thead className="text-fog-400">
+                    <tr>
+                        <th className="py-1.5 pr-3 font-medium"></th>
+                        {QUOTA_WINDOWS.map(({ key, label }) => (
+                            <th key={key} className="px-3 py-1.5 text-right font-medium">
+                                {label}
+                            </th>
+                        ))}
+                    </tr>
+                </thead>
+                <tbody>
+                    {rows.map((row) => (
+                        <tr key={row.id} className="border-ink-700 text-fog-200 border-t">
+                            <td className="py-1.5 pr-3">
+                                <span className="text-fog-100">{row.label}</span>
+                                {row.sublabel ? (
+                                    <span className="text-fog-500 ml-1.5">{row.sublabel}</span>
+                                ) : null}
+                            </td>
+                            {QUOTA_WINDOWS.map(({ key }) => (
+                                <td key={key} className="px-3 py-1.5 text-right">
+                                    <ShareCell share={row.usage[key]} />
+                                </td>
+                            ))}
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+        </div>
+    );
+}
+
+// The user's share of the accounts' current provider windows, broken down by account or by key.
+function QuotaUsage({
+    user,
+    breakdown,
+    keys,
+}: {
+    user: User;
+    breakdown: LimitsBreakdown;
+    keys: OwnerLimitUsage[];
+}) {
     return (
         <div className="border-ink-700 bg-ink-900/45 mt-4 rounded-lg border p-4">
-            <div className="grid gap-4 sm:grid-cols-3">
-                {QUOTA_WINDOWS.map(({ key, label, limit }, index) => {
-                    const share = user.quota_usage[key];
-                    const fraction = share ? Math.min(share.used_pct, 1) : 0;
-                    return (
-                        <div
-                            key={key}
-                            className={index > 0 ? "border-ink-700 sm:border-l sm:pl-4" : ""}
-                        >
-                            <div className="flex items-baseline justify-between gap-2">
-                                <div className="text-fog-200 text-sm font-medium">{label}</div>
-                                <div className="text-fog-100 text-sm font-semibold tabular-nums">
-                                    {share ? `${(share.used_pct * 100).toFixed(1)}%` : "—"}
-                                </div>
-                            </div>
-                            <div className="text-fog-400 mt-0.5 text-xs">
-                                {share
-                                    ? share.reset_at
-                                        ? `of one account's ${limit} · ${formatCountdown(share.reset_at)}`
-                                        : `of one account's ${limit}`
-                                    : `No account has a ${limit} open`}
-                            </div>
-                            {share ? (
-                                <div className="bg-ink-700 mt-3 h-2 overflow-hidden rounded-full">
-                                    <div
-                                        className={`h-full rounded-full transition-all ${fraction >= 0.9 ? "bg-bad-500" : fraction >= 0.7 ? "bg-warn-500" : "bg-brand-500"}`}
-                                        style={{ width: `${fraction * 100}%` }}
-                                    />
-                                </div>
-                            ) : null}
-                        </div>
-                    );
-                })}
+            <QuotaTotals usage={user.quota_usage} budget={user.limit_budget} />
+            <div className="border-ink-700 mt-4 border-t pt-3">
+                <div className="text-fog-300 mb-1 text-xs font-medium">
+                    {breakdown === "account" ? "By account" : "By key"}
+                </div>
+                {breakdown === "account" ? (
+                    <ShareTable
+                        rows={user.quota_usage_by_account.map((entry) => ({
+                            id: entry.account_id,
+                            label: entry.account_label,
+                            usage: entry,
+                        }))}
+                        emptyLabel="No usage in any account's open windows."
+                    />
+                ) : (
+                    <ShareTable
+                        rows={keys.map((key) => ({
+                            id: key.id,
+                            label: key.name,
+                            sublabel: [
+                                key.active ? "" : "disabled",
+                                key.budget.five_hour
+                                    ? `5h ≤ ${formatShare(key.budget.five_hour)}`
+                                    : "",
+                                key.budget.weekly ? `7d ≤ ${formatShare(key.budget.weekly)}` : "",
+                            ]
+                                .filter(Boolean)
+                                .join(" · "),
+                            usage: key.usage,
+                        }))}
+                        emptyLabel="This user has no keys."
+                    />
+                )}
             </div>
-            <div className="text-fog-400 mt-2 text-xs">
-                Measured from each account&apos;s quota and split by this user&apos;s share of the
-                proxy traffic. Summed across accounts.
+            <div className="text-fog-400 mt-3 text-xs">
+                Percent of one account&apos;s limit, measured from each account&apos;s quota and
+                split by this user&apos;s share of the proxy traffic. Totals are summed across
+                accounts.
             </div>
         </div>
     );
@@ -267,11 +425,12 @@ function ThinkingLevelSelector({
     value: ThinkingLevel[];
     onChange: (levels: ThinkingLevel[]) => void;
 }) {
+    const thinkingLevels = useThinkingLevels();
     const toggle = (level: ThinkingLevel) => {
         onChange(
             value.includes(level)
                 ? value.filter((candidate) => candidate !== level)
-                : THINKING_LEVELS.filter(
+                : thinkingLevels.filter(
                       (candidate) => candidate === level || value.includes(candidate),
                   ),
         );
@@ -283,7 +442,7 @@ function ThinkingLevelSelector({
             hint="Requests with an explicit effort outside this set are blocked. Requests without one remain allowed."
         >
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                {THINKING_LEVELS.map((level) => {
+                {thinkingLevels.map((level) => {
                     const checked = value.includes(level);
                     return (
                         <label
@@ -451,9 +610,15 @@ export default function UsersPage() {
     const [selectionMode, setSelectionMode] = useState(false);
     const [bulkPriority, setBulkPriority] = useState("1");
     const [applyingBulkPriority, setApplyingBulkPriority] = useState(false);
-    const [usageView, setUsageView] = useStoredState<UsageView>(USAGE_VIEW_KEY, "cost", (raw) =>
+    const [usageView, setUsageView] = useStoredState<UsageView>(USAGE_VIEW_KEY, "quota", (raw) =>
         raw === "quota" || raw === "cost" ? raw : undefined,
     );
+    const [limitsBreakdown, setLimitsBreakdown] = useStoredState<LimitsBreakdown>(
+        LIMITS_BREAKDOWN_KEY,
+        "account",
+        (raw) => (raw === "account" || raw === "key" ? raw : undefined),
+    );
+    const [limitKeys, setLimitKeys] = useState<OwnerLimitUsage[]>([]);
 
     const [showCreate, setShowCreate] = useState(false);
     const [editTarget, setEditTarget] = useState<User | null>(null);
@@ -471,12 +636,19 @@ export default function UsersPage() {
     // the spinner and the retry button resets it explicitly.
     const load = useCallback(
         () =>
-            Promise.all([api.users(), api.presets(), api.userModelOptions()]).then(
-                ([loaded, loadedPresets, loadedModels]) => {
+            Promise.all([
+                api.users(),
+                api.presets(),
+                api.userModelOptions(),
+                // Per-key shares for the "By key" breakdown; the page still works without them.
+                api.limits().catch(() => null),
+            ]).then(
+                ([loaded, loadedPresets, loadedModels, limits]) => {
                     setError(null);
                     setUsers(loaded);
                     setPresets(loadedPresets);
                     setModelOptions(loadedModels);
+                    setLimitKeys(limits?.keys ?? []);
                     setSavedPriorities(
                         Object.fromEntries(loaded.map((user) => [user.id, user.priority ?? 4])),
                     );
@@ -610,8 +782,8 @@ export default function UsersPage() {
                 <div>
                     <h1 className="text-fog-100 text-2xl font-semibold tracking-tight">Users</h1>
                     <p className="text-fog-400 mt-0.5 text-sm">
-                        Each user holds one or more API keys. Set per-user rate limits and budgets;
-                        usage is tracked per user.
+                        Each user holds one or more API keys. Set per-user and per-key rate limits
+                        and limit budgets; usage is tracked per user and per key.
                     </p>
                 </div>
                 <div className="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto sm:justify-end">
@@ -637,6 +809,14 @@ export default function UsersPage() {
                             onChange={changeUsageView}
                             label="Show usage as"
                         />
+                        {usageView === "quota" ? (
+                            <Segmented
+                                options={LIMITS_BREAKDOWN_OPTIONS}
+                                value={limitsBreakdown}
+                                onChange={setLimitsBreakdown}
+                                label="Break limits down"
+                            />
+                        ) : null}
                         <Button variant="ghost" onClick={() => void load()}>
                             Refresh
                         </Button>
@@ -849,14 +1029,6 @@ export default function UsersPage() {
                                                                         <div className="text-fog-400 mt-0.5 text-[11px] tracking-wider uppercase">
                                                                             All-time tokens
                                                                         </div>
-                                                                        {user.lifetime_token_budget ? (
-                                                                            <div className="text-fog-500 mt-1 text-[10px]">
-                                                                                Limit{" "}
-                                                                                {formatTokens(
-                                                                                    user.lifetime_token_budget,
-                                                                                )}
-                                                                            </div>
-                                                                        ) : null}
                                                                     </div>
                                                                     {usageView === "quota" ? (
                                                                         <div className="bg-ink-900 flex-1 px-4 py-3">
@@ -879,14 +1051,6 @@ export default function UsersPage() {
                                                                             <div className="text-fog-400 mt-0.5 text-[11px] tracking-wider uppercase">
                                                                                 All-time spend
                                                                             </div>
-                                                                            {user.lifetime_spend_budget_usd ? (
-                                                                                <div className="text-fog-500 mt-1 text-[10px]">
-                                                                                    Limit{" "}
-                                                                                    {formatUsd(
-                                                                                        user.lifetime_spend_budget_usd,
-                                                                                    )}
-                                                                                </div>
-                                                                            ) : null}
                                                                         </div>
                                                                     )}
                                                                     <div className="bg-ink-900 flex-1 px-4 py-3">
@@ -912,7 +1076,15 @@ export default function UsersPage() {
                                                                 </div>
 
                                                                 {usageView === "quota" ? (
-                                                                    <QuotaUsage user={user} />
+                                                                    <QuotaUsage
+                                                                        user={user}
+                                                                        breakdown={limitsBreakdown}
+                                                                        keys={limitKeys.filter(
+                                                                            (key) =>
+                                                                                key.user_id ===
+                                                                                user.id,
+                                                                        )}
+                                                                    />
                                                                 ) : (
                                                                     <MonthlyUsage user={user} />
                                                                 )}
@@ -1080,7 +1252,8 @@ function KeysPanel({
     const [creating, setCreating] = useState(false);
     const [newLabel, setNewLabel] = useState("");
     const [newRate, setNewRate] = useState("");
-    const [newBudget, setNewBudget] = useState("");
+    const [newFiveHourBudget, setNewFiveHourBudget] = useState("");
+    const [newWeeklyBudget, setNewWeeklyBudget] = useState("");
     const [editTarget, setEditTarget] = useState<ApiKey | null>(null);
     const [deleteTarget, setDeleteTarget] = useState<ApiKey | null>(null);
 
@@ -1112,11 +1285,13 @@ function KeysPanel({
             const res = await api.createKey(user.id, {
                 label: newLabel,
                 rate_limit_per_minute: parseLimitInput(newRate),
-                monthly_token_budget: parseLimitInput(newBudget),
+                five_hour_limit_budget: parsePercentInput(newFiveHourBudget),
+                weekly_limit_budget: parsePercentInput(newWeeklyBudget),
             });
             setNewLabel("");
             setNewRate("");
-            setNewBudget("");
+            setNewFiveHourBudget("");
+            setNewWeeklyBudget("");
             setKeys((current) => (current ? [...current, res.api_key] : [res.api_key]));
             onRevealed(res.api_key.label ?? "key", res.secret);
             onChanged();
@@ -1198,8 +1373,23 @@ function KeysPanel({
                                     <div className="mt-1 flex flex-wrap items-center gap-1.5">
                                         <LimitBadges
                                             rate={key.rate_limit_per_minute}
-                                            budget={key.monthly_token_budget}
+                                            budget={key.limit_budget}
                                         />
+                                        {key.quota_usage.five_hour || key.quota_usage.weekly ? (
+                                            <span className="text-fog-300 text-[11px] tabular-nums">
+                                                {[
+                                                    key.quota_usage.five_hour
+                                                        ? `5h ${formatShare(key.quota_usage.five_hour.used_pct)}`
+                                                        : "",
+                                                    key.quota_usage.weekly
+                                                        ? `7d ${formatShare(key.quota_usage.weekly.used_pct)}`
+                                                        : "",
+                                                ]
+                                                    .filter(Boolean)
+                                                    .join(" · ")}{" "}
+                                                used
+                                            </span>
+                                        ) : null}
                                         <span className="text-fog-400 text-[11px]">
                                             Last used {formatDateTime(key.last_used_at)}
                                         </span>
@@ -1242,7 +1432,7 @@ function KeysPanel({
             )}
 
             {/* New key */}
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_7rem_8rem_auto] sm:items-end">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_6rem_6rem_6rem_auto] sm:items-end">
                 <TextInput
                     value={newLabel}
                     onChange={(e) => setNewLabel(e.target.value)}
@@ -1259,9 +1449,20 @@ function KeysPanel({
                 <TextInput
                     type="number"
                     min={0}
-                    value={newBudget}
-                    onChange={(e) => setNewBudget(e.target.value)}
-                    placeholder="tokens/mo"
+                    step="any"
+                    value={newFiveHourBudget}
+                    onChange={(e) => setNewFiveHourBudget(e.target.value)}
+                    placeholder="5h %"
+                    aria-label="5-hour limit budget in percent"
+                />
+                <TextInput
+                    type="number"
+                    min={0}
+                    step="any"
+                    value={newWeeklyBudget}
+                    onChange={(e) => setNewWeeklyBudget(e.target.value)}
+                    placeholder="7d %"
+                    aria-label="Weekly limit budget in percent"
                 />
                 <Button
                     variant="primary"
@@ -1273,9 +1474,10 @@ function KeysPanel({
                 </Button>
             </div>
             <p className="text-fog-400 text-[11px]">
-                Optional per-key limits: requests per minute and a monthly token budget. Leave blank
-                to use the server default; set 0 for unlimited. Per-user limits (set on the user)
-                apply on top, across all their keys.
+                Optional per-key limits: requests per minute (blank uses the server default, 0 is
+                unlimited) and a limit budget in percent of one account&apos;s 5-hour or weekly
+                limit (blank means no cap). Per-user limits (set on the user) apply on top, across
+                all their keys.
             </p>
 
             {editTarget ? (
@@ -1310,7 +1512,7 @@ function KeysPanel({
 }
 
 // ---------------------------------------------------------------------------
-// Edit key modal (label + per-key rate limit and monthly token budget).
+// Edit key modal (label + per-key rate limit and limit budget).
 // ---------------------------------------------------------------------------
 
 function EditKeyModal({
@@ -1328,9 +1530,10 @@ function EditKeyModal({
     const [rate, setRate] = useState(
         apiKey.rate_limit_per_minute ? String(apiKey.rate_limit_per_minute) : "",
     );
-    const [budget, setBudget] = useState(
-        apiKey.monthly_token_budget ? String(apiKey.monthly_token_budget) : "",
+    const [fiveHourBudget, setFiveHourBudget] = useState(
+        percentInput(apiKey.limit_budget.five_hour),
     );
+    const [weeklyBudget, setWeeklyBudget] = useState(percentInput(apiKey.limit_budget.weekly));
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
@@ -1344,7 +1547,9 @@ function EditKeyModal({
                 // For keys, null (use server default) and 0 (unlimited) differ, so a blank
                 // field must leave the limit UNCHANGED rather than silently forcing 0.
                 rate_limit_per_minute: parseLimitInput(rate) ?? undefined,
-                monthly_token_budget: parseLimitInput(budget) ?? undefined,
+                // A blank budget means no cap, which the API spells 0.
+                five_hour_limit_budget: parsePercentInput(fiveHourBudget) ?? 0,
+                weekly_limit_budget: parsePercentInput(weeklyBudget) ?? 0,
             });
             onSaved(updated);
         } catch (err) {
@@ -1363,32 +1568,25 @@ function EditKeyModal({
                         placeholder="e.g. laptop"
                     />
                 </Field>
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    <Field
-                        label="Rate limit (req / min)"
-                        hint="0 = unlimited. Blank leaves it unchanged."
-                    >
-                        <TextInput
-                            type="number"
-                            min={0}
-                            value={rate}
-                            onChange={(e) => setRate(e.target.value)}
-                            placeholder="unchanged"
-                        />
-                    </Field>
-                    <Field
-                        label="Monthly token budget"
-                        hint="0 = unlimited. Blank leaves it unchanged."
-                    >
-                        <TextInput
-                            type="number"
-                            min={0}
-                            value={budget}
-                            onChange={(e) => setBudget(e.target.value)}
-                            placeholder="unchanged"
-                        />
-                    </Field>
-                </div>
+                <Field
+                    label="Rate limit (req / min)"
+                    hint="0 = unlimited. Blank leaves it unchanged."
+                >
+                    <TextInput
+                        type="number"
+                        min={0}
+                        value={rate}
+                        onChange={(e) => setRate(e.target.value)}
+                        placeholder="unchanged"
+                    />
+                </Field>
+                <LimitBudgetFields
+                    fiveHour={fiveHourBudget}
+                    weekly={weeklyBudget}
+                    onFiveHour={setFiveHourBudget}
+                    onWeekly={setWeeklyBudget}
+                    scope="This key"
+                />
 
                 {error ? (
                     <div
@@ -1428,6 +1626,7 @@ function CreateUserModal({
     onClose: () => void;
     onCreated: (user: User) => void;
 }) {
+    const thinkingLevels = useThinkingLevels();
     const [name, setName] = useState("");
     const [priority, setPriority] = useState("1");
     const [fallbackEnabled, setFallbackEnabled] = useState(presets[0]?.fallback_enabled ?? false);
@@ -1435,10 +1634,8 @@ function CreateUserModal({
     const [rate, setRate] = useState("");
     const [hourlyRate, setHourlyRate] = useState("");
     const [dailyRate, setDailyRate] = useState("");
-    const [budget, setBudget] = useState("");
-    const [lifetimeBudget, setLifetimeBudget] = useState("");
-    const [monthlySpend, setMonthlySpend] = useState("");
-    const [lifetimeSpend, setLifetimeSpend] = useState("");
+    const [fiveHourBudget, setFiveHourBudget] = useState("");
+    const [weeklyBudget, setWeeklyBudget] = useState("");
     const [presetId, setPresetId] = useState(presets[0]?.id ?? "");
     const [allowedModels, setAllowedModels] = useState<string[] | null>(
         presets[0]?.allowed_models ?? null,
@@ -1447,7 +1644,7 @@ function CreateUserModal({
         presets[0]?.model_overrides ?? {},
     );
     const [allowedThinkingLevels, setAllowedThinkingLevels] = useState<ThinkingLevel[]>(
-        presets[0]?.allowed_thinking_levels ?? [...THINKING_LEVELS],
+        presets[0]?.allowed_thinking_levels ?? [...thinkingLevels],
     );
     const [allowedModes, setAllowedModes] = useState<ThinkingMode[]>(
         presets[0]?.allowed_thinking_modes ?? ["disabled", "enabled", "adaptive"],
@@ -1472,10 +1669,8 @@ function CreateUserModal({
                 rate_limit_per_minute: parseLimitInput(rate),
                 rate_limit_per_hour: parseLimitInput(hourlyRate),
                 rate_limit_per_day: parseLimitInput(dailyRate),
-                monthly_token_budget: parseLimitInput(budget),
-                lifetime_token_budget: parseLimitInput(lifetimeBudget),
-                monthly_spend_budget_usd: parseMoneyInput(monthlySpend),
-                lifetime_spend_budget_usd: parseMoneyInput(lifetimeSpend),
+                five_hour_limit_budget: parsePercentInput(fiveHourBudget),
+                weekly_limit_budget: parsePercentInput(weeklyBudget),
                 preset_id: presetId || null,
                 ...(!presetId
                     ? {
@@ -1581,52 +1776,13 @@ function CreateUserModal({
                     onDay={setDailyRate}
                 />
 
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    <Field label="Monthly token budget" hint="Optional. Blank = unlimited.">
-                        <TextInput
-                            type="number"
-                            min={0}
-                            value={budget}
-                            onChange={(e) => setBudget(e.target.value)}
-                            placeholder="unlimited"
-                        />
-                    </Field>
-                    <Field label="Lifetime token budget" hint="One-time cap. Blank = unlimited.">
-                        <TextInput
-                            type="number"
-                            min={0}
-                            value={lifetimeBudget}
-                            onChange={(e) => setLifetimeBudget(e.target.value)}
-                            placeholder="unlimited"
-                        />
-                    </Field>
-                    <Field
-                        label="Monthly spend budget (USD)"
-                        hint="API-equivalent value. Blank = unlimited."
-                    >
-                        <TextInput
-                            type="number"
-                            min={0}
-                            step="0.01"
-                            value={monthlySpend}
-                            onChange={(e) => setMonthlySpend(e.target.value)}
-                            placeholder="unlimited"
-                        />
-                    </Field>
-                    <Field
-                        label="Lifetime spend budget (USD)"
-                        hint="One-time API-equivalent cap. Blank = unlimited."
-                    >
-                        <TextInput
-                            type="number"
-                            min={0}
-                            step="0.01"
-                            value={lifetimeSpend}
-                            onChange={(e) => setLifetimeSpend(e.target.value)}
-                            placeholder="unlimited"
-                        />
-                    </Field>
-                </div>
+                <LimitBudgetFields
+                    fiveHour={fiveHourBudget}
+                    weekly={weeklyBudget}
+                    onFiveHour={setFiveHourBudget}
+                    onWeekly={setWeeklyBudget}
+                    scope="This user"
+                />
 
                 {error ? (
                     <div
@@ -1663,7 +1819,7 @@ function CreateUserModal({
 }
 
 // ---------------------------------------------------------------------------
-// Edit user modal (name + active + per-user rate limit and token budget).
+// Edit user modal (name + active + per-user rate limits and limit budget).
 // ---------------------------------------------------------------------------
 
 function EditUserModal({
@@ -1693,18 +1849,8 @@ function EditUserModal({
     const [dailyRate, setDailyRate] = useState(
         user.rate_limit_per_day ? String(user.rate_limit_per_day) : "",
     );
-    const [budget, setBudget] = useState(
-        user.monthly_token_budget ? String(user.monthly_token_budget) : "",
-    );
-    const [lifetimeBudget, setLifetimeBudget] = useState(
-        user.lifetime_token_budget ? String(user.lifetime_token_budget) : "",
-    );
-    const [monthlySpend, setMonthlySpend] = useState(
-        user.monthly_spend_budget_usd ? String(user.monthly_spend_budget_usd) : "",
-    );
-    const [lifetimeSpend, setLifetimeSpend] = useState(
-        user.lifetime_spend_budget_usd ? String(user.lifetime_spend_budget_usd) : "",
-    );
+    const [fiveHourBudget, setFiveHourBudget] = useState(percentInput(user.limit_budget.five_hour));
+    const [weeklyBudget, setWeeklyBudget] = useState(percentInput(user.limit_budget.weekly));
     const [selectedPresetId, setSelectedPresetId] = useState(user.preset_id ?? "");
     const [overrideFields, setOverrideFields] = useState<string[]>(user.preset_overrides);
     const toggleOverride = (field: string) =>
@@ -1751,10 +1897,8 @@ function EditUserModal({
                 rate_limit_per_minute: parseLimitInput(rate) ?? 0,
                 rate_limit_per_hour: parseLimitInput(hourlyRate) ?? 0,
                 rate_limit_per_day: parseLimitInput(dailyRate) ?? 0,
-                monthly_token_budget: parseLimitInput(budget) ?? 0,
-                lifetime_token_budget: parseLimitInput(lifetimeBudget) ?? 0,
-                monthly_spend_budget_usd: parseMoneyInput(monthlySpend) ?? 0,
-                lifetime_spend_budget_usd: parseMoneyInput(lifetimeSpend) ?? 0,
+                five_hour_limit_budget: parsePercentInput(fiveHourBudget) ?? 0,
+                weekly_limit_budget: parsePercentInput(weeklyBudget) ?? 0,
                 ...(shouldUseOverride("model_overrides")
                     ? { model_overrides: modelOverrides }
                     : {}),
@@ -1817,58 +1961,13 @@ function EditUserModal({
                     onDay={setDailyRate}
                 />
 
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    <Field
-                        label="Monthly token budget"
-                        hint="Across all the user's keys. 0 or blank = unlimited."
-                    >
-                        <TextInput
-                            type="number"
-                            min={0}
-                            value={budget}
-                            onChange={(e) => setBudget(e.target.value)}
-                            placeholder="unlimited"
-                        />
-                    </Field>
-                    <Field
-                        label="Lifetime token budget"
-                        hint="One-time cap. 0 or blank = unlimited."
-                    >
-                        <TextInput
-                            type="number"
-                            min={0}
-                            value={lifetimeBudget}
-                            onChange={(e) => setLifetimeBudget(e.target.value)}
-                            placeholder="unlimited"
-                        />
-                    </Field>
-                    <Field
-                        label="Monthly spend budget (USD)"
-                        hint="API-equivalent value. 0 or blank = unlimited."
-                    >
-                        <TextInput
-                            type="number"
-                            min={0}
-                            step="0.01"
-                            value={monthlySpend}
-                            onChange={(e) => setMonthlySpend(e.target.value)}
-                            placeholder="unlimited"
-                        />
-                    </Field>
-                    <Field
-                        label="Lifetime spend budget (USD)"
-                        hint="One-time API-equivalent cap. 0 or blank = unlimited."
-                    >
-                        <TextInput
-                            type="number"
-                            min={0}
-                            step="0.01"
-                            value={lifetimeSpend}
-                            onChange={(e) => setLifetimeSpend(e.target.value)}
-                            placeholder="unlimited"
-                        />
-                    </Field>
-                </div>
+                <LimitBudgetFields
+                    fiveHour={fiveHourBudget}
+                    weekly={weeklyBudget}
+                    onFiveHour={setFiveHourBudget}
+                    onWeekly={setWeeklyBudget}
+                    scope="This user"
+                />
 
                 <Field label="Policy preset">
                     <SelectMenu

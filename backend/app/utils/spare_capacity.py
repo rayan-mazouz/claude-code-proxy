@@ -53,9 +53,13 @@ class QuotaWindow:
 
 def quota_windows(account: AccountDb) -> tuple[QuotaWindow, ...]:
     settings = config.get_settings()
+    weekly = QuotaWindow("weekly", account.weekly_used_pct, account.weekly_reset_at, WEEKLY_WINDOW, settings.SPARE_CAPACITY_WEEKLY_FLOOR)
+    if account.has_five_hour_limit is False:
+        # Current Max plans have no 5-hour window.
+        return (weekly,)
     return (
         QuotaWindow("five_hour", account.session_used_pct, account.session_reset_at, FIVE_HOUR_WINDOW, settings.SPARE_CAPACITY_FIVE_HOUR_FLOOR),
-        QuotaWindow("weekly", account.weekly_used_pct, account.weekly_reset_at, WEEKLY_WINDOW, settings.SPARE_CAPACITY_WEEKLY_FLOOR),
+        weekly,
     )
 
 

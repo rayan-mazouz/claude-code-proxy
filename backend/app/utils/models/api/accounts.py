@@ -10,6 +10,17 @@ from typing import List, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from .base import AccountStatus, ProviderHealth
+from .limits import AccountScopedLimit
+
+
+def _rotation():
+    from app.utils import rotation  # deferred: rotation imports these API models
+
+    return rotation
+
+
+def _scoped_limits(account_db):
+    return _rotation().scoped_limits(account_db)
 
 
 class Account(BaseModel):
@@ -34,6 +45,10 @@ class Account(BaseModel):
     weekly_reset_at: Optional[datetime]
     monthly_used_pct: Optional[float]
     monthly_reset_at: Optional[datetime]
+    # False for plans without a 5-hour window (current Max plans); session_* are then always null.
+    has_five_hour_limit: bool = True
+    # Model-scoped weekly allowances, e.g. the share of the weekly limit Fable models may use.
+    scoped_limits: List[AccountScopedLimit] = Field(default_factory=list)
     cooldown_until: Optional[datetime]
     five_hour_rotation_threshold: float
     weekly_rotation_threshold: float
@@ -73,6 +88,17 @@ class Account(BaseModel):
             weekly_reset_at=account_db.weekly_reset_at,
             monthly_used_pct=account_db.monthly_used_pct,
             monthly_reset_at=account_db.monthly_reset_at,
+            has_five_hour_limit=account_db.has_five_hour_limit is not False,
+            scoped_limits=[
+                AccountScopedLimit(
+                    model=limit.model,
+                    used_pct=limit.used_pct,
+                    reset_at=limit.reset_at,
+                    active=limit.active,
+                    exhausted=_rotation().scoped_entry_exhausted(account_db, limit),
+                )
+                for limit in _scoped_limits(account_db)
+            ],
             cooldown_until=account_db.cooldown_until,
             five_hour_rotation_threshold=account_db.five_hour_rotation_threshold,
             weekly_rotation_threshold=account_db.weekly_rotation_threshold,

@@ -1,17 +1,39 @@
 # Path: app/config.py
-# Description: Loads the global `.env` file and exposes a pydantic `BaseSettings` class plus the fixed proxy/OAuth constants.
+# Description: Loads the editable `.env` config file (live-reloaded) and exposes a pydantic `BaseSettings` class plus the fixed proxy/OAuth constants.
 
 import json
-from functools import lru_cache
+import logging
+import os
+import threading
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, cast
 
-from pydantic import Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, ValidationError, field_validator, model_validator
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 from sqlalchemy.engine import URL
 
-# Repo-root .env, loaded for local development; in containers the values come from the process environment.
+from app.utils import config_file
+
+# The editable config file. CCP_CONFIG_FILE names it (the containers bind-mount the deployment's .env at
+# /app/config/.env); without it the repo-root .env is used for local development. Values in this file win over the
+# process environment, which Docker froze when the container was created, so dashboard edits take effect.
+CONFIG_FILE_ENV = "CCP_CONFIG_FILE"
 _ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
+# How often get_settings() re-stats the config file for changes.
+RELOAD_CHECK_SECONDS = 2.0
+
+_log = logging.getLogger(__name__)
+
+
+def config_file_path() -> Path:
+    raw = os.environ.get(CONFIG_FILE_ENV, "").strip()
+    return Path(raw) if raw else _ENV_FILE
+
+
+# Every effort level the Messages API accepts, lowest first; THINKING_LEVELS selects the ones this proxy offers.
+KNOWN_THINKING_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 # Everything the backend serves is mounted under this path prefix; the dashboard lives at "/" and the backend at "/api"
 # on the same Traefik host, so the proxy endpoint is /api/v1/messages. Both the router mount and the upstream-forwarding
@@ -108,6 +130,19 @@ class Settings(BaseSettings):
     WARMUP_MODEL: str = "claude-haiku-4-5"
     # Comma-separated local model allowlist. Blank keeps the built-in lineup.
     ALLOWED_MODELS: str = ""
+    # Comma-separated effort levels the proxy recognizes and the dashboard offers, lowest first. A request naming any
+    # other level is refused. Add "xhigh" (between high and max) to make it selectable for users and presets.
+    THINKING_LEVELS: str = "low,medium,high,max"
+
+    @field_validator("THINKING_LEVELS")
+    @classmethod
+    def _check_thinking_levels(cls, value: str) -> str:
+        """Fail at load time (keeping the previous settings on a live reload) instead of on every request."""
+        levels = [item.strip().lower() for item in value.split(",") if item.strip()]
+        unknown = sorted(set(levels) - set(KNOWN_THINKING_LEVELS))
+        if unknown:
+            raise ValueError(f"unknown effort level(s): {', '.join(unknown)}; known: {', '.join(KNOWN_THINKING_LEVELS)}")
+        return value
 
     # Default proxy rate limit (requests/minute) for an API key with no explicit override; 0 disables limiting.
     DEFAULT_KEY_RATE_LIMIT_PER_MINUTE: int = 0
@@ -184,7 +219,20 @@ class Settings(BaseSettings):
         return self
 
     # extra="ignore" so deploy-only keys in .env (HTTP_PORT, TRAEFIK_*, POSTGRES_*) don't fail backend startup.
-    model_config = SettingsConfigDict(env_file=str(_ENV_FILE), env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=str(config_file_path()), env_file_encoding="utf-8", extra="ignore")
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # The config file beats the process environment: the container environment is a stale copy of the file
+        # taken when the container was created, while the file is what the operator (or the dashboard) edits.
+        return (init_settings, dotenv_settings, env_settings, file_secret_settings)
 
     def concurrency_limit_for(self, model: str | None = None, tier: str | None = None) -> int:
         for raw, key in ((self.MODEL_CONCURRENCY_LIMITS_JSON, model), (self.TIER_CONCURRENCY_LIMITS_JSON, tier)):
@@ -200,7 +248,178 @@ class Settings(BaseSettings):
         return max(1, min(int(self.MAX_CONCURRENT_REQUESTS_PER_ACCOUNT), 32))
 
 
-@lru_cache
+def file_field_values(values: dict[str, str]) -> dict[str, str]:
+    """The subset of raw config-file values that are Settings fields (keys matched case-insensitively)."""
+    fields = {name.upper(): name for name in Settings.model_fields}
+    return {fields[key.upper()]: value for key, value in values.items() if key.upper() in fields}
+
+
+def build_settings(file_values: Optional[dict[str, str]] = None) -> Settings:
+    """Build Settings from config-file values (read from disk when omitted) layered over the process environment.
+
+    The file is read once, under a shared lock, and passed as init values, which outrank the environment; the
+    model validators (including the unsafe-secret guard) run as usual.
+    """
+    if file_values is None:
+        file_values = config_file.read_values(config_file_path())
+    return Settings(_env_file=None, **cast(dict[str, Any], file_field_values(file_values)))
+
+
+def _error_fields(exc: ValidationError) -> str:
+    # Never log str(exc): pydantic includes the input values, which hold secrets.
+    parts = []
+    for error in exc.errors():
+        location = ".".join(str(part) for part in error.get("loc", ())) or "settings"
+        parts.append(f"{location}: {error.get('msg', 'invalid')}")
+    return "; ".join(parts)
+
+
+class _SettingsState:
+    """Process-wide current Settings, rebuilt when the config file changes."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.reset()
+
+    def reset(self) -> None:
+        self.current: Optional[Settings] = None
+        self.startup: Optional[Settings] = None
+        self.signature: Optional[tuple] = None
+        self.failed_signature: Optional[tuple] = None
+        self.unreadable = False
+        self.checked_at = 0.0
+
+    def get(self) -> Settings:
+        current = self.current
+        if current is not None and time.monotonic() - self.checked_at < RELOAD_CHECK_SECONDS:
+            return current
+        with self.lock:
+            now = time.monotonic()
+            if self.current is not None and now - self.checked_at < RELOAD_CHECK_SECONDS:
+                return self.current
+            self.checked_at = now
+            path = config_file_path()
+            signature = config_file.signature(path)
+            if self.current is not None and signature in (self.signature, self.failed_signature):
+                return self.current
+            try:
+                file_values = config_file.read_values(path)
+            except OSError as exc:
+                # Unreadable (permissions, I/O error): not the same as an empty config. Retry on every check (a chmod
+                # does not change the signature), but only warn when the file first becomes unreadable.
+                reason = exc.strerror or type(exc).__name__
+                if self.current is not None:
+                    if not self.unreadable:
+                        _log.warning("Config file %s is not readable (%s); keeping the current settings", path, reason)
+                    self.unreadable = True
+                    return self.current
+                _log.warning("Config file %s is not readable (%s); using the process environment only", path, reason)
+                settings = build_settings({})
+                self.current = self.startup = settings
+                self.signature = None
+                self.unreadable = True
+                return settings
+            try:
+                settings = build_settings(file_values)
+            except (ValidationError, ValueError) as exc:
+                if self.current is None:
+                    raise
+                self.failed_signature = signature
+                self.unreadable = False
+                detail = _error_fields(exc) if isinstance(exc, ValidationError) else type(exc).__name__
+                _log.warning("Config file %s changed but is invalid; keeping the previous settings (%s)", path, detail)
+                return self.current
+            if self.current is not None:
+                _log.info("Reloaded settings from %s", path)
+            self.current = settings
+            self.signature = signature
+            self.failed_signature = None
+            self.unreadable = False
+            if self.startup is None:
+                self.startup = settings
+            return settings
+
+
+_STATE = _SettingsState()
+
+
+class LiveSettings:
+    """A stable handle on the current Settings.
+
+    Modules keep ``settings = get_settings()`` at import time; every attribute read goes to the newest valid
+    Settings, so edits to the config file reach them within RELOAD_CHECK_SECONDS. Attribute writes (tests'
+    monkeypatch) go to the current instance.
+    """
+
+    __slots__ = ()
+
+    @property  # type: ignore[misc]
+    def __class__(self):  # noqa: D105 -- isinstance(get_settings(), Settings) keeps working
+        return Settings
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(_STATE.get(), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(_STATE.get(), name, value)
+
+    def __delattr__(self, name: str) -> None:
+        delattr(_STATE.get(), name)
+
+    def __repr__(self) -> str:
+        return "LiveSettings(<hidden>)"
+
+
+_LIVE = LiveSettings()
+
+
 def get_settings() -> Settings:
-    """Get settings from .env file."""
-    return Settings()
+    """Return the live settings handle (values follow the config file; see LiveSettings)."""
+    _STATE.get()  # build eagerly so configuration errors surface at the call site, as before
+    return cast(Settings, _LIVE)
+
+
+def _cache_clear() -> None:
+    """Forget the loaded settings; the next access rebuilds them from the file and environment."""
+    with _STATE.lock:
+        _STATE.reset()
+
+
+get_settings.cache_clear = _cache_clear  # type: ignore[attr-defined]
+
+
+def reload_settings() -> Settings:
+    """Re-read the config file now instead of waiting for the next periodic check."""
+    with _STATE.lock:
+        _STATE.checked_at = 0.0
+        _STATE.signature = None
+        _STATE.failed_signature = None
+    return _STATE.get()
+
+
+def current_settings() -> Settings:
+    """The concrete current Settings instance (not the live handle)."""
+    return _STATE.get()
+
+
+def startup_settings() -> Settings:
+    """The Settings this process started with; restart-class keys keep these values until the process restarts."""
+    _STATE.get()
+    assert _STATE.startup is not None
+    return _STATE.startup
+
+
+def setting_as_text(settings: Settings, key: str) -> str:
+    """Render a Settings field the way it would be written to .env."""
+    value = getattr(settings, key)
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def pending_restart_keys(keys: frozenset[str] | set[str]) -> list[str]:
+    """Settings fields among ``keys`` whose current value differs from the value this process started with."""
+    current, startup = current_settings(), startup_settings()
+    return sorted(key for key in keys if key in Settings.model_fields and getattr(current, key) != getattr(startup, key))

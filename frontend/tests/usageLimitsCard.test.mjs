@@ -23,7 +23,11 @@ function compile(path, aliases = {}) {
 const format = compile("../src/lib/format.ts");
 const { UsageLimitsCard } = compile("../src/components/UsageLimitsCard.tsx", {
     "@/lib/format": format,
-    "@/components/ui": { Card: ({ children }) => React.createElement("div", null, children) },
+    "@/components/ui": {
+        Card: ({ children }) => React.createElement("div", null, children),
+        Segmented: ({ options }) =>
+            React.createElement("div", null, options.map((option) => option.label).join("|")),
+    },
 });
 const stats = {
     input_rate_pct: 99.86,
@@ -85,4 +89,23 @@ test("reset credits are the fifth metric, a count, and never repeated in the foo
     assert.equal((html.match(/Available limit resets/g) ?? []).length, 1);
     const unsupported = render({ total_reset_credits_available: null });
     assert.equal([...unsupported.matchAll(/<dt[^>]*>/g)].length, 4);
+});
+
+test("plans without a 5-hour window blank the 5-hour average", () => {
+    const content = text(render({ five_hour_limited_accounts: 0 }));
+    assert.match(content, /Average 5-hour limit—No account has a 5-hour limit/);
+    const partial = text(render({ five_hour_limited_accounts: 4 }));
+    assert.match(partial, /the 5-hour average covers the 4 with a 5-hour limit/);
+});
+
+test("a per-account breakdown adds a view toggle", () => {
+    const html = renderToStaticMarkup(
+        React.createElement(UsageLimitsCard, {
+            stats,
+            perAccount: React.createElement("table", null, "per-account rows"),
+        }),
+    );
+    assert.match(text(html), /Averages\|Per account/);
+    // The averages stay the default view.
+    assert.doesNotMatch(html, /per-account rows/);
 });

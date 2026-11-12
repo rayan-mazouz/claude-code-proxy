@@ -31,12 +31,86 @@ class QuotaWindow:
     threshold: float
 
 
+def has_five_hour_limit(account: AccountDb) -> bool:
+    """False once the usage probe reported no 5-hour window for the account (current Max plans)."""
+    return account.has_five_hour_limit is not False
+
+
 def quota_windows(account: AccountDb) -> tuple[QuotaWindow, ...]:
-    return (
-        QuotaWindow("five_hour", "5-hour", account.session_used_pct, account.session_reset_at, account.five_hour_rotation_threshold),
-        QuotaWindow("weekly", "Weekly", account.weekly_used_pct, account.weekly_reset_at, account.weekly_rotation_threshold),
-        QuotaWindow("monthly", "Monthly", account.monthly_used_pct, account.monthly_reset_at, 1.0),
-    )
+    """The provider windows that limit ``account``. Accounts without a 5-hour limit have no five_hour window."""
+    windows = []
+    if has_five_hour_limit(account):
+        windows.append(QuotaWindow("five_hour", "5-hour", account.session_used_pct, account.session_reset_at, account.five_hour_rotation_threshold))
+    windows.append(QuotaWindow("weekly", "Weekly", account.weekly_used_pct, account.weekly_reset_at, account.weekly_rotation_threshold))
+    windows.append(QuotaWindow("monthly", "Monthly", account.monthly_used_pct, account.monthly_reset_at, 1.0))
+    return tuple(windows)
+
+
+def quota_window(account: AccountDb, key: str) -> Optional[QuotaWindow]:
+    return next((window for window in quota_windows(account) if window.key == key), None)
+
+
+@dataclass(frozen=True)
+class ScopedLimit:
+    """A model-scoped weekly allowance, e.g. the share of the weekly limit Fable models may use."""
+
+    model: str  # display name reported by the provider, e.g. "Fable"
+    used_pct: Optional[float]  # 0..1 of the scoped allowance
+    reset_at: Optional[datetime]
+    active: bool
+
+
+def scoped_limits(account: AccountDb) -> list[ScopedLimit]:
+    try:
+        raw = json.loads(account.scoped_limits_json or "[]")
+    except (TypeError, ValueError):
+        return []
+    limits = []
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, Mapping) or not isinstance(entry.get("model"), str) or not entry["model"].strip():
+            continue
+        used = entry.get("used_pct")
+        reset_at = None
+        if isinstance(entry.get("reset_at"), str):
+            try:
+                reset_at = datetime.fromisoformat(entry["reset_at"])
+            except ValueError:
+                reset_at = None
+        limits.append(
+            ScopedLimit(entry["model"].strip(), float(used) if isinstance(used, (int, float)) else None, reset_at, bool(entry.get("active")))
+        )
+    return limits
+
+
+def scoped_limit_for(account: AccountDb, model: Optional[str]) -> Optional[ScopedLimit]:
+    """The scoped allowance that applies to ``model`` (matched by family name, e.g. "Fable" -> claude-fable-5-2)."""
+    if not isinstance(model, str) or not model.strip():
+        return None
+    normalized = model.strip().lower()
+    for limit in scoped_limits(account):
+        family = re.sub(r"[\s._]+", "-", limit.model.strip().lower())
+        if re.search(rf"(^|[-_.]){re.escape(family)}($|[-_.\d\[])", normalized):
+            return limit
+    return None
+
+
+def scoped_entry_exhausted(account: AccountDb, limit: ScopedLimit, now: Optional[datetime] = None) -> bool:
+    """True while ``limit`` is at the account's weekly rotation threshold and has not reset yet."""
+    if limit.used_pct is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    reset_at = limit.reset_at
+    if reset_at is not None and reset_at.tzinfo is None:
+        reset_at = reset_at.replace(tzinfo=timezone.utc)
+    if reset_at is not None and reset_at <= now:
+        return False
+    return limit.used_pct >= min(1.0, account.weekly_rotation_threshold)
+
+
+def scoped_limit_exhausted(account: AccountDb, model: Optional[str], now: Optional[datetime] = None) -> bool:
+    """True while the model's scoped weekly allowance on ``account`` is at its rotation threshold."""
+    limit = scoped_limit_for(account, model)
+    return limit is not None and scoped_entry_exhausted(account, limit, now)
 
 
 def account_load(account: AccountDb) -> float:
@@ -118,7 +192,7 @@ def is_available(account: AccountDb, now: Optional[datetime] = None) -> bool:
     return True
 
 
-def recovery_time(account: AccountDb, now: Optional[datetime] = None) -> Optional[datetime]:
+def recovery_time(account: AccountDb, now: Optional[datetime] = None, model: Optional[str] = None) -> Optional[datetime]:
     """Earliest time the account may serve traffic again, or None when no recovery time is known.
 
     Disabled and reauth-required accounts never recover on their own. An
@@ -140,6 +214,11 @@ def recovery_time(account: AccountDb, now: Optional[datetime] = None) -> Optiona
         if window.reset_at is None:
             return None
         recovers_at = max(recovers_at, aware(window.reset_at))
+    if model is not None and scoped_limit_exhausted(account, model, now):
+        scoped = scoped_limit_for(account, model)
+        if scoped is None or scoped.reset_at is None:
+            return None
+        recovers_at = max(recovers_at, aware(scoped.reset_at))
     return recovers_at
 
 
@@ -164,11 +243,17 @@ def preview_account(
     db: Session,
     user: Optional[UserDb] = None,
     exclude_ids: Optional[Set[uuid.UUID]] = None,
+    model: Optional[str] = None,
 ) -> Optional[AccountDb]:
-    """Return the highest-priority account that is currently able to serve traffic for ``user``."""
+    """Return the highest-priority account that is currently able to serve traffic for ``user``.
+
+    With ``model``, accounts whose scoped weekly allowance for that model family is used up are skipped.
+    """
     exclude_ids = exclude_ids or set()
     now = datetime.now(timezone.utc)
-    candidates = [a for a in db.query(AccountDb).all() if a.id not in exclude_ids and is_available(a, now)]
+    candidates = [
+        a for a in db.query(AccountDb).all() if a.id not in exclude_ids and is_available(a, now) and not scoped_limit_exhausted(a, model, now)
+    ]
     if user is not None and user.spare_capacity_only:
         candidates = [a for a in candidates if spare_capacity.allows(a, now)]
     if not candidates:
@@ -181,9 +266,10 @@ def select_account(
     db: Session,
     user: Optional[UserDb] = None,
     exclude_ids: Optional[Set[uuid.UUID]] = None,
+    model: Optional[str] = None,
 ) -> Optional[AccountDb]:
     """Choose the highest-priority eligible account and update its activity timestamp."""
-    chosen = preview_account(db, user, exclude_ids)
+    chosen = preview_account(db, user, exclude_ids, model)
     if chosen is None:
         return None
 
@@ -276,7 +362,12 @@ def _parse_reset(value: Optional[str]) -> Optional[datetime]:
     try:
         ts = float(value)
     except ValueError:
-        return None
+        # Some bodies carry an ISO 8601 timestamp instead of epoch seconds.
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     if ts > 1e12:  # milliseconds -> seconds
         ts = ts / 1000.0
     return datetime.fromtimestamp(ts, tz=timezone.utc)
@@ -286,7 +377,9 @@ def update_quota_from_headers(account: AccountDb, headers: Mapping[str, str]) ->
     """Update an account's quota fields from response headers (mutates in place). Returns the unified-status string."""
     h = _lower(headers)
 
-    session_util = h.get("anthropic-ratelimit-unified-5h-utilization")
+    # Only the usage probe decides whether the account has a 5-hour window (it can bring one back); until then an
+    # account without one keeps no 5-hour state, whatever the headers say.
+    session_util = h.get("anthropic-ratelimit-unified-5h-utilization") if has_five_hour_limit(account) else None
     weekly_util = h.get("anthropic-ratelimit-unified-7d-utilization")
 
     if session_util is not None:
@@ -300,7 +393,7 @@ def update_quota_from_headers(account: AccountDb, headers: Mapping[str, str]) ->
         except ValueError:
             pass
 
-    session_reset = _parse_reset(h.get("anthropic-ratelimit-unified-5h-reset"))
+    session_reset = _parse_reset(h.get("anthropic-ratelimit-unified-5h-reset")) if has_five_hour_limit(account) else None
     if session_reset is not None:
         account.session_reset_at = session_reset
     weekly_reset = _parse_reset(h.get("anthropic-ratelimit-unified-7d-reset"))
@@ -310,23 +403,73 @@ def update_quota_from_headers(account: AccountDb, headers: Mapping[str, str]) ->
     return h.get("anthropic-ratelimit-unified-status")
 
 
-def apply_rate_limit_body(account: AccountDb, body: bytes) -> tuple[Optional[str], Optional[datetime]]:
+# A hard limit resetting further out than this cannot be a 5-hour window, so on plans without one it is weekly.
+_WEEKLY_RESET_MIN = timedelta(hours=5, minutes=15)
+# A scoped allowance's reset and a 429's reset closer than this describe the same window.
+_SCOPED_RESET_TOLERANCE = timedelta(hours=1)
+
+
+def scoped_limit_hit(account: AccountDb, model: Optional[str], reset_at: Optional[datetime]) -> Optional[ScopedLimit]:
+    """The model-scoped allowance a hard limit most likely came from, or None when it looks account-wide."""
+    limit = scoped_limit_for(account, model)
+    # Only a weekly-length reset can come from a weekly allowance; short or unknown resets stay account-wide.
+    if limit is None or reset_at is None or reset_at - datetime.now(timezone.utc) < _WEEKLY_RESET_MIN:
+        return None
+    # An account-wide window at (or of unknown distance from) its threshold could be the real cause.
+    for window in quota_windows(account):
+        if window.key != "monthly" and (window.used_pct is None or window.used_pct >= window.threshold * 0.98):
+            return None
+    if limit.used_pct is not None and limit.used_pct >= 0.9:
+        return limit
+    if limit.reset_at is not None:
+        tracked = limit.reset_at if limit.reset_at.tzinfo else limit.reset_at.replace(tzinfo=timezone.utc)
+        if abs(tracked - reset_at) <= _SCOPED_RESET_TOLERANCE:
+            return limit
+    return None
+
+
+def mark_scoped_limit_exhausted(account: AccountDb, model: str, reset_at: Optional[datetime]) -> None:
+    """Record that ``model``'s scoped allowance is used up until ``reset_at`` (or its known reset)."""
+    target = scoped_limit_for(account, model)
+    if target is None:
+        return
+    updated = []
+    for limit in scoped_limits(account):
+        if limit.model == target.model:
+            limit = ScopedLimit(limit.model, 1.0, reset_at or limit.reset_at, True)
+        updated.append(
+            {
+                "model": limit.model,
+                "used_pct": limit.used_pct,
+                "reset_at": limit.reset_at.isoformat() if limit.reset_at else None,
+                "active": limit.active,
+            }
+        )
+    account.scoped_limits_json = json.dumps(updated, separators=(",", ":"))
+
+
+def apply_rate_limit_body(
+    account: AccountDb, body: bytes, model: Optional[str] = None
+) -> tuple[Optional[str], Optional[datetime], Optional[ScopedLimit]]:
     """Persist Anthropic rate-limit state and any provider reset timestamp.
 
     Anthropic commonly returns a JSON ``rate_limit_error`` body without a
     useful ``Retry-After`` header.  Parsing it prevents the router from
     retrying a hard-limited subscription after the generic cooldown.
+
+    Returns the limit type, the reset time, and the model-scoped allowance when the limit came from one (for
+    example Fable's share of the weekly limit); a scoped hit leaves the account usable for other models.
     """
     try:
         payload = json.loads(body.decode(errors="replace"))
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
-        return None, None
+        return None, None, None
     error = payload.get("error") if isinstance(payload, Mapping) else None
     if not isinstance(error, Mapping):
-        return None, None
+        return None, None, None
     reached_type = error.get("type") or error.get("code")
     if not isinstance(reached_type, str):
-        return None, None
+        return None, None, None
     payload_mapping = payload if isinstance(payload, Mapping) else {}
     reset_raw = error.get("resets_at") or error.get("reset_at") or payload_mapping.get("resets_at")
     reset_at = _parse_reset(str(reset_raw)) if reset_raw is not None else None
@@ -337,10 +480,21 @@ def apply_rate_limit_body(account: AccountDb, body: bytes) -> tuple[Optional[str
                 reset_at = datetime.now(timezone.utc) + timedelta(seconds=max(0, float(seconds_raw)))
         except (TypeError, ValueError):
             reset_at = None
-    if reached_type in HARD_LIMIT_BODY_TYPES:
+    if reached_type not in HARD_LIMIT_BODY_TYPES:
+        return reached_type, reset_at, None
+    scoped = scoped_limit_hit(account, model, reset_at)
+    if scoped is not None:
+        mark_scoped_limit_exhausted(account, model, reset_at)
+        return reached_type, reset_at, scoped
+    if has_five_hour_limit(account):
         account.session_used_pct = 1.0
         account.session_reset_at = reset_at
-    return reached_type, reset_at
+    elif reset_at is not None and reset_at - datetime.now(timezone.utc) >= _WEEKLY_RESET_MIN:
+        # Without a 5-hour window a long reset can only be the weekly limit. Shorter limits (per-minute,
+        # concurrency) are covered by the cooldown the caller applies and must not mark the week as used up.
+        account.weekly_used_pct = 1.0
+        account.weekly_reset_at = reset_at
+    return reached_type, reset_at, None
 
 
 def recover_confirmed_quota_cooldown(account: AccountDb, usage: Mapping) -> bool:
@@ -353,7 +507,8 @@ def recover_confirmed_quota_cooldown(account: AccountDb, usage: Mapping) -> bool
         return False
     if account.provider_health == ProviderHealth.REAUTH_REQUIRED or usage.get("limit_reached") is True:
         return False
-    for key in ("five_hour", "seven_day"):
+    required = ("five_hour", "seven_day") if has_five_hour_limit(account) else ("seven_day",)
+    for key in required:
         bucket = usage.get(key)
         if not isinstance(bucket, Mapping) or not isinstance(bucket.get("utilization"), (int, float)) or not 0 <= bucket["utilization"] <= 1:
             return False
@@ -421,7 +576,28 @@ def apply_usage_probe(account: AccountDb, usage: Mapping[str, Optional[dict]]) -
     five_hour = usage.get("five_hour")
     seven_day = usage.get("seven_day")
 
-    if five_hour:
+    if "has_five_hour_limit" in usage:
+        account.has_five_hour_limit = bool(usage["has_five_hour_limit"])
+        if not account.has_five_hour_limit:
+            # Drop the last 5-hour reading so it can neither block the account nor show as a stale window.
+            account.session_used_pct = None
+            account.session_reset_at = None
+    if "scoped_limits" in usage and isinstance(usage["scoped_limits"], list):
+        account.scoped_limits_json = json.dumps(
+            [
+                {
+                    "model": limit["model"],
+                    "used_pct": limit.get("used_pct"),
+                    "reset_at": limit["reset_at"].isoformat() if isinstance(limit.get("reset_at"), datetime) else None,
+                    "active": bool(limit.get("active")),
+                }
+                for limit in usage["scoped_limits"]
+                if isinstance(limit, Mapping) and isinstance(limit.get("model"), str)
+            ],
+            separators=(",", ":"),
+        )
+
+    if five_hour and has_five_hour_limit(account):
         if five_hour.get("utilization") is not None:
             account.session_used_pct = five_hour["utilization"]
         if five_hour.get("is_cold") is True:

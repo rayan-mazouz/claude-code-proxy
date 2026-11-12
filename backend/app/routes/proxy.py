@@ -30,6 +30,7 @@ from app.utils import (
     events,
     notifications,
     provider_health,
+    quota_attribution,
     request_context,
     request_policy,
     rotation,
@@ -39,7 +40,7 @@ from app.utils import (
     warmup,
 )
 from app.utils.postgres import AccountDb, AnthropicFallbackDb, ApiKeyDb, ProxyEventDb, UserDb, get_db, get_db_cm
-from app.utils.thinking import thinking_level_from_request
+from app.utils.thinking import thinking_level_from_request, thinking_levels
 
 # Get the logger
 logger = get_logger()
@@ -48,6 +49,43 @@ logger = get_logger()
 settings = config.get_settings()
 
 router = APIRouter(tags=["Proxy"])
+
+_BUDGET_WINDOW_LABELS = {"five_hour": "5-hour", "weekly": "weekly"}
+
+
+def _enforce_limit_budget(db: Session, owner: str, row, *, user_name: str) -> None:
+    """Reject with 429 once a user's or key's limit budget is used up, until the window holding it resets."""
+    breach = quota_attribution.budget_breach(db, owner, row.id, row.five_hour_limit_budget, row.weekly_limit_budget)
+    if breach is None:
+        return
+    window = _BUDGET_WINDOW_LABELS[breach.window]
+    subject = "User" if owner == "users" else "API key"
+    now = datetime.now(timezone.utc)
+    retry_after = max(60, ceil((breach.reset_at - now).total_seconds())) if breach.reset_at is not None else 3600
+    notifications.enqueue_client_limit(
+        db,
+        "user_monthly_budget" if owner == "users" else "api_key_monthly_budget",
+        user_name=user_name,
+        key_label=getattr(row, "label", None),
+        key_prefix=getattr(row, "key_prefix", None),
+        limit=f"{breach.budget * 100:.0f}% of one account's {window} limit",
+        dedupe_key=f"{row.id}:{breach.window}:{breach.reset_at.isoformat() if breach.reset_at else 'open'}",
+        dashboard_url=settings.FRONTEND_ORIGIN,
+        extra={
+            "window": window,
+            "used": f"{breach.used_pct * 100:.1f}%",
+            "reset_at": notifications.format_time(breach.reset_at),
+        },
+    )
+    db.commit()
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=(
+            f"{subject} {window} limit budget exhausted ({breach.used_pct * 100:.1f}% used of "
+            f"{breach.budget * 100:.0f}% of one account's {window} limit); it frees up as the window resets."
+        ),
+        headers={"Retry-After": str(retry_after)},
+    )
 
 
 def _emit_event(
@@ -718,6 +756,11 @@ async def proxy_messages(
             request_model = effective_model
             _set_archive_metadata(request, upstream_model=request_model)
 
+    if requested_thinking_level is not None and requested_thinking_level not in thinking_levels():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Thinking level '{requested_thinking_level}' is not enabled on this proxy.",
+        )
     if user is not None and requested_thinking_level is not None and requested_thinking_level not in user.allowed_thinking_levels:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -772,27 +815,8 @@ async def proxy_messages(
                     detail=f"User {label} rate limit exceeded; slow down.",
                     headers={"Retry-After": str(retry_after)},
                 )
-    if user is not None and user.monthly_token_budget and user.monthly_token_budget > 0:
-        if usage.monthly_token_usage(db, user_id) >= user.monthly_token_budget:
-            notifications.enqueue_client_limit(
-                db,
-                "user_monthly_budget",
-                user_name=user.name,
-                limit=user.monthly_token_budget,
-                dedupe_key=f"{user.id}:{datetime.now(timezone.utc):%Y-%m}",
-                dashboard_url=settings.FRONTEND_ORIGIN,
-            )
-            db.commit()
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User monthly token budget exhausted.")
-    if user is not None and user.lifetime_token_budget and user.lifetime_token_budget > 0:
-        if usage.total_token_usage(db, user_id) >= user.lifetime_token_budget:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User lifetime token budget exhausted.")
-    if user is not None and user.monthly_spend_budget_usd and user.monthly_spend_budget_usd > 0:
-        if usage.spend_usage(db, user_id=user_id, month_to_date=True) >= user.monthly_spend_budget_usd:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User monthly spend budget exhausted.")
-    if user is not None and user.lifetime_spend_budget_usd and user.lifetime_spend_budget_usd > 0:
-        if usage.spend_usage(db, user_id=user_id) >= user.lifetime_spend_budget_usd:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User lifetime spend budget exhausted.")
+    if user is not None:
+        _enforce_limit_budget(db, "users", user, user_name=user.name)
 
     # Per-key limits, enforced before opening any upstream connection.
     rate_limit = key.rate_limit_per_minute if key.rate_limit_per_minute is not None else settings.DEFAULT_KEY_RATE_LIMIT_PER_MINUTE
@@ -837,20 +861,7 @@ async def proxy_messages(
         )
     )
     db.flush()
-    if key.monthly_token_budget and key.monthly_token_budget > 0:
-        if usage.monthly_token_usage_for_key(db, api_key_id) >= key.monthly_token_budget:
-            notifications.enqueue_client_limit(
-                db,
-                "api_key_monthly_budget",
-                user_name=user.name if user is not None else "Unknown user",
-                key_label=key.label,
-                key_prefix=key.key_prefix,
-                limit=key.monthly_token_budget,
-                dedupe_key=f"{key.id}:{datetime.now(timezone.utc):%Y-%m}",
-                dashboard_url=settings.FRONTEND_ORIGIN,
-            )
-            db.commit()
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API key monthly token budget exhausted.")
+    _enforce_limit_budget(db, "keys", key, user_name=user.name if user is not None else "Unknown user")
 
     exclude_ids = set()
     resp = None
@@ -865,9 +876,9 @@ async def proxy_messages(
 
     # Account selection with transparent failover on rate limits.
     for _ in range(max_attempts + pool_wait_slots):
-        account = rotation.select_account(db, user, exclude_ids)
+        account = rotation.select_account(db, user, exclude_ids, request_model)
         if account is None:
-            if user.spare_capacity_only and rotation.preview_account(db, None, exclude_ids) is not None:
+            if user.spare_capacity_only and rotation.preview_account(db, None, exclude_ids, request_model) is not None:
                 # Accounts can still serve other users; only this user's spare-capacity share is used up.
                 spare_capacity_throttled = True
                 break
@@ -879,7 +890,7 @@ async def proxy_messages(
             wait_until = now_utc + timedelta(seconds=max(0.0, pool_wait_deadline - now_monotonic))
             recoverable = any(
                 recovers_at is not None and recovers_at <= wait_until
-                for recovers_at in (rotation.recovery_time(candidate, now_utc) for candidate in db.query(AccountDb).all())
+                for recovers_at in (rotation.recovery_time(candidate, now_utc, request_model) for candidate in db.query(AccountDb).all())
             )
             if not recoverable or now_monotonic >= pool_wait_deadline:
                 break
@@ -1014,10 +1025,31 @@ async def proxy_messages(
 
         rate_limit_body = await candidate.aread() if candidate.status_code == 429 else b""
         unified_status = rotation.update_quota_from_headers(account, candidate.headers)
-        body_status, body_reset_at = rotation.apply_rate_limit_body(account, rate_limit_body)
+        body_status, body_reset_at, scoped_hit = rotation.apply_rate_limit_body(account, rate_limit_body, request_model)
         unified_status = body_status or unified_status
         provider_health.mark_response(account, candidate)
         hard_limit = candidate.status_code == 429 or unified_status in rotation.HARD_LIMIT_STATUSES
+        if hard_limit and scoped_hit is not None:
+            # Only this model family's allowance is used up: skip the account for it, keep it for other models.
+            db.commit()
+            await candidate.aclose()
+            _emit_event(
+                request,
+                "account.rate_limited",
+                user_id=user_id,
+                api_key_id=api_key_id,
+                account_id=account.id,
+                status_code=429,
+                message=f"{scoped_hit.model} weekly allowance used up",
+                metadata={
+                    **_upstream_diagnostics(candidate),
+                    "failure_class": "model_allowance",
+                    "scoped_model": scoped_hit.model,
+                    "provider_reset_at": body_reset_at,
+                },
+            )
+            exclude_ids.add(account.id)
+            continue
         if hard_limit:
             notifications.enqueue_account_hard_limit(db, account, settings.FRONTEND_ORIGIN)
         else:

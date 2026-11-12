@@ -3,7 +3,8 @@
 import { useState } from "react";
 import { Plus, SlidersHorizontal, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
-import { Preset, ThinkingLevel, ThinkingMode, THINKING_LEVELS } from "@/lib/types";
+import { Preset, ThinkingLevel, ThinkingMode } from "@/lib/types";
+import { useThinkingLevels } from "@/lib/useThinkingLevels";
 import { Button, Field, Modal, SelectMenu, TextInput } from "@/components/ui";
 
 const MODES: ThinkingMode[] = ["disabled", "enabled", "adaptive"];
@@ -164,6 +165,7 @@ export function ModelRulesEditor({
     showLevels?: boolean;
     showModes?: boolean;
 }) {
+    const thinkingLevels = useThinkingLevels();
     const [newModel, setNewModel] = useState("");
     const configured = [
         ...new Set([
@@ -199,7 +201,7 @@ export function ModelRulesEditor({
                     variant="ghost"
                     disabled={!newModel}
                     onClick={() => {
-                        if (showLevels) onLevels({ ...levels, [newModel]: [...THINKING_LEVELS] });
+                        if (showLevels) onLevels({ ...levels, [newModel]: [...thinkingLevels] });
                         if (showModes) onModes({ ...modes, [newModel]: [...MODES] });
                         setNewModel("");
                     }}
@@ -227,8 +229,8 @@ export function ModelRulesEditor({
                         {showLevels && (
                             <Field label="Thinking levels">
                                 <Chips
-                                    values={THINKING_LEVELS}
-                                    selected={levels[model] ?? [...THINKING_LEVELS]}
+                                    values={thinkingLevels}
+                                    selected={levels[model] ?? [...thinkingLevels]}
                                     onChange={(items) => onLevels({ ...levels, [model]: items })}
                                 />
                             </Field>
@@ -260,12 +262,13 @@ function PresetModal({
     onClose: () => void;
     onSaved: () => void;
 }) {
+    const thinkingLevels = useThinkingLevels();
     const [name, setName] = useState(preset?.name ?? "");
     const [fallbackEnabled, setFallbackEnabled] = useState(preset?.fallback_enabled ?? false);
     const [allModels, setAllModels] = useState(preset?.allowed_models === null || !preset);
     const [allowedModels, setAllowedModels] = useState<string[]>(preset?.allowed_models ?? []);
     const [levels, setLevels] = useState<ThinkingLevel[]>(
-        preset?.allowed_thinking_levels ?? [...THINKING_LEVELS],
+        preset?.allowed_thinking_levels ?? [...thinkingLevels],
     );
     const [modes, setModes] = useState<ThinkingMode[]>(preset?.allowed_thinking_modes ?? MODES);
     const [redirects, setRedirects] = useState<Record<string, string>>(
@@ -381,7 +384,7 @@ function PresetModal({
                                             setModelLevels({});
                                         } else {
                                             setPreviousGlobalLevels(levels);
-                                            setLevels([...THINKING_LEVELS]);
+                                            setLevels([...thinkingLevels]);
                                             setModelLevels(
                                                 Object.fromEntries(
                                                     selectedModels.map((model) => [
@@ -397,7 +400,7 @@ function PresetModal({
                             </label>
                             {useGlobalThinking ? (
                                 <Chips
-                                    values={THINKING_LEVELS}
+                                    values={thinkingLevels}
                                     selected={levels}
                                     onChange={setLevels}
                                 />
@@ -427,7 +430,7 @@ function PresetModal({
                                         {model}
                                     </code>
                                     <Chips
-                                        values={THINKING_LEVELS}
+                                        values={thinkingLevels}
                                         selected={modelLevels[model] ?? previousGlobalLevels}
                                         onChange={(items) =>
                                             setModelLevels({ ...modelLevels, [model]: items })

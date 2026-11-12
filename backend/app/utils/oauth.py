@@ -215,6 +215,29 @@ def _normalize_bucket(
     }
 
 
+def _scoped_limits(limits) -> list[Dict]:
+    """Model-scoped weekly allowances from the probe's ``limits`` list, e.g. the Fable share of the weekly limit."""
+    result = []
+    for entry in limits if isinstance(limits, list) else []:
+        if not isinstance(entry, dict) or entry.get("kind") != "weekly_scoped":
+            continue
+        scope = entry.get("scope") if isinstance(entry.get("scope"), dict) else {}
+        model = scope.get("model") if isinstance(scope.get("model"), dict) else {}
+        name = model.get("display_name") or model.get("id")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        bucket = _normalize_bucket({"utilization": entry.get("percent"), "resets_at": entry.get("resets_at")}) or {}
+        result.append(
+            {
+                "model": name.strip(),
+                "used_pct": bucket.get("utilization"),
+                "reset_at": bucket.get("reset_at"),
+                "active": entry.get("is_active") is True,
+            }
+        )
+    return result
+
+
 def _probe_retry_delay(resp: httpx.Response, prior_attempts: int) -> float:
     """Backoff before the next probe attempt: honor a short `Retry-After`, else a fixed schedule, capped."""
     backoff = _USAGE_PROBE_BACKOFF[min(prior_attempts, len(_USAGE_PROBE_BACKOFF) - 1)]
@@ -242,7 +265,7 @@ def fetch_usage(access_token: str, *, egress_target: egress.EgressTarget | None 
             resp.raise_for_status()
             data = resp.json()
             observed_at = datetime.now(timezone.utc)
-            return {
+            result = {
                 "five_hour": _normalize_bucket(
                     data.get("five_hour"),
                     window_seconds=FIVE_HOUR_WINDOW_SECONDS,
@@ -250,4 +273,10 @@ def fetch_usage(access_token: str, *, egress_target: egress.EgressTarget | None 
                 ),
                 "seven_day": _normalize_bucket(data.get("seven_day")),
             }
+            # Only a well-formed reply (one with a weekly bucket) can prove the 5-hour window is gone: current Max
+            # plans report "five_hour": null.
+            if isinstance(data, dict) and isinstance(data.get("seven_day"), dict):
+                result["has_five_hour_limit"] = isinstance(data.get("five_hour"), dict)
+                result["scoped_limits"] = _scoped_limits(data.get("limits"))
+            return result
     raise RuntimeError("unreachable")  # pragma: no cover -- the loop always returns or raises

@@ -69,7 +69,8 @@ def is_eligible(account: AccountDb, now: Optional[datetime] = None) -> bool:
         return False
     if account.cooldown_until is not None and _future(account.cooldown_until, now):
         return False
-    if account.session_used_pct is None:
+    # Warm-up opens 5-hour windows early; an account without one has nothing to stagger.
+    if account.has_five_hour_limit is False or account.session_used_pct is None:
         return False
     if account.weekly_used_pct is not None and account.weekly_used_pct >= settings.WARMUP_WEEKLY_RESERVE_PCT:
         return False

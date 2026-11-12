@@ -32,6 +32,11 @@ PERMISSIONS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Permissions only the environment-configured owner (wildcard "*") holds. They are deliberately absent from
+# PERMISSIONS, so they can never be granted to a team member: the Settings page edits the owner password, secrets
+# and the database connection, which would let any holder take over the deployment.
+OWNER_ONLY_PERMISSIONS: Final[frozenset[str]] = frozenset({"settings:read", "settings:write"})
+
 LEGACY_PERMISSION_ALIASES: Final[dict[str, str]] = {
     "events:archive:read": "analytics:events:archive:read",
 }
@@ -111,6 +116,8 @@ def required_permission(path: str, method: str) -> str | None:
         return "fallbacks:write"
     if normalized.startswith("/notifications"):
         return "notifications:read" if method == "GET" else "notifications:write"
+    if normalized == "/settings" or normalized.startswith("/settings/"):
+        return "settings:read" if method == "GET" else "settings:write"
     return "dashboard:unmapped"
 
 

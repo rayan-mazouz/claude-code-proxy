@@ -5,12 +5,14 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import boto3
 from botocore.config import Config
+
+from app.config import config_file_path
+from app.utils import config_file, config_watch
 
 
 def cycle() -> None:
@@ -96,17 +98,36 @@ def cycle() -> None:
     flush()
 
 
+def _refresh_environment() -> None:
+    """Apply the editable config file over the container environment (the file wins), so edits apply next cycle."""
+    try:
+        config_file.overlay_environ(config_file_path())
+    except (OSError, ValueError) as exc:
+        print(f"config file unreadable, keeping previous values: {type(exc).__name__}", flush=True)
+
+
+def _interval() -> int:
+    return max(60, int(os.environ.get("ARCHIVE_RETENTION_INTERVAL_SECONDS", "3600")))
+
+
 def main() -> None:
-    if os.environ.get("ARCHIVE_RETENTION_ENABLED", "false").lower() != "true":
-        print("retention disabled", flush=True)
-        while True:
-            time.sleep(max(60, int(os.environ.get("ARCHIVE_RETENTION_INTERVAL_SECONDS", "3600"))))
+    _refresh_environment()
+    # Exits (status 0) when a restart-class setting changes, so Docker restarts the worker with the new config.
+    watcher = config_watch.RestartWatcher(use_settings=False)
+    announced_disabled = False
     while True:
-        try:
-            cycle()
-        except Exception as exc:
-            print(f"retention cycle failed: {exc!r}", flush=True)
-        time.sleep(max(60, int(os.environ.get("ARCHIVE_RETENTION_INTERVAL_SECONDS", "3600"))))
+        _refresh_environment()
+        if os.environ.get("ARCHIVE_RETENTION_ENABLED", "false").lower() != "true":
+            if not announced_disabled:
+                print("retention disabled", flush=True)
+                announced_disabled = True
+        else:
+            announced_disabled = False
+            try:
+                cycle()
+            except Exception as exc:
+                print(f"retention cycle failed: {exc!r}", flush=True)
+        watcher.sleep(_interval())
 
 
 if __name__ == "__main__":

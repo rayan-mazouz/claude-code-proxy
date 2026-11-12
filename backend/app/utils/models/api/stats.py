@@ -146,6 +146,8 @@ class OverviewResponse(BaseModel):
     # Pool inventory -- not range-dependent.
     total_accounts: int
     active_accounts: int
+    # Active accounts that still have a 5-hour window (current Max plans only have weekly limits).
+    five_hour_limited_accounts: int = 0
     usable_accounts: int
     total_reset_credits_available: Optional[int] = None
     five_hour_average_pct: float

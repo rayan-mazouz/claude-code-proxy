@@ -78,7 +78,7 @@ function exhaustedQuotaWindow(account: Account): ExhaustedQuotaWindow | null {
         {
             label: "5-hour limit",
             resetAt: account.session_reset_at,
-            fraction: account.session_used_pct,
+            fraction: account.has_five_hour_limit ? account.session_used_pct : null,
         },
         {
             label: "Weekly limit",
@@ -133,20 +133,38 @@ function accountIsUsable(account: Account, now = Date.now()): boolean {
     if (account.provider_health === "REAUTH_REQUIRED") return false;
     if (account.cooldown_until && new Date(account.cooldown_until).getTime() > now) return false;
     return (
-        (account.session_used_pct ?? 0) < account.five_hour_rotation_threshold &&
+        (!account.has_five_hour_limit ||
+            (account.session_used_pct ?? 0) < account.five_hour_rotation_threshold) &&
         (account.weekly_used_pct ?? 0) < account.weekly_rotation_threshold &&
         (account.monthly_used_pct ?? 0) < 1
     );
 }
 
-function accountQuotaWindows(account: Account) {
-    return [
-        {
-            key: "five_hour",
-            label: "5-hour window",
-            fraction: account.session_used_pct,
-            resetAt: account.session_reset_at,
-        },
+type AccountQuotaWindow = {
+    key: string;
+    label: string;
+    fraction: number | null;
+    resetAt: string | null;
+    // Shown instead of a bar, e.g. for plans that have no such window.
+    note?: string;
+};
+
+function accountQuotaWindows(account: Account): AccountQuotaWindow[] {
+    const windows: AccountQuotaWindow[] = [
+        account.has_five_hour_limit
+            ? {
+                  key: "five_hour",
+                  label: "5-hour window",
+                  fraction: account.session_used_pct,
+                  resetAt: account.session_reset_at,
+              }
+            : {
+                  key: "five_hour",
+                  label: "5-hour window",
+                  fraction: null,
+                  resetAt: null,
+                  note: "No 5-hour limit on this plan",
+              },
         {
             key: "weekly",
             label: "Weekly window",
@@ -159,7 +177,17 @@ function accountQuotaWindows(account: Account) {
             fraction: account.monthly_used_pct,
             resetAt: account.monthly_reset_at,
         },
-    ].filter((window) => window.fraction !== null || window.resetAt !== null);
+        // Model-scoped weekly allowances, e.g. how much of the weekly limit Fable may use.
+        ...account.scoped_limits.map((limit) => ({
+            key: `scoped:${limit.model}`,
+            label: `${limit.model} weekly allowance`,
+            fraction: limit.used_pct,
+            resetAt: limit.reset_at,
+        })),
+    ];
+    return windows.filter(
+        (window) => window.note || window.fraction !== null || window.resetAt !== null,
+    );
 }
 
 function appearsAuthenticated(account: Account): boolean {
@@ -844,19 +872,36 @@ export default function AccountsPage() {
                                                                                     key={window.key}
                                                                                     className="bg-ink-950/35 rounded-md p-2.5"
                                                                                 >
-                                                                                    <UsageBar
-                                                                                        label={
-                                                                                            window.label
-                                                                                        }
-                                                                                        fraction={
-                                                                                            window.fraction
-                                                                                        }
-                                                                                    />
-                                                                                    <div className="text-fog-400 mt-1.5 text-[11px]">
-                                                                                        {formatCountdown(
-                                                                                            window.resetAt,
-                                                                                        )}
-                                                                                    </div>
+                                                                                    {window.note ? (
+                                                                                        <>
+                                                                                            <div className="text-fog-300 text-xs font-medium">
+                                                                                                {
+                                                                                                    window.label
+                                                                                                }
+                                                                                            </div>
+                                                                                            <div className="text-fog-400 mt-1.5 text-[11px]">
+                                                                                                {
+                                                                                                    window.note
+                                                                                                }
+                                                                                            </div>
+                                                                                        </>
+                                                                                    ) : (
+                                                                                        <>
+                                                                                            <UsageBar
+                                                                                                label={
+                                                                                                    window.label
+                                                                                                }
+                                                                                                fraction={
+                                                                                                    window.fraction
+                                                                                                }
+                                                                                            />
+                                                                                            <div className="text-fog-400 mt-1.5 text-[11px]">
+                                                                                                {formatCountdown(
+                                                                                                    window.resetAt,
+                                                                                                )}
+                                                                                            </div>
+                                                                                        </>
+                                                                                    )}
                                                                                 </div>
                                                                             ))
                                                                         )}
@@ -979,6 +1024,7 @@ export default function AccountsPage() {
                                                                             disabled ||
                                                                             acc.provider_health !==
                                                                                 "HEALTHY" ||
+                                                                            !acc.has_five_hour_limit ||
                                                                             acc.session_used_pct ===
                                                                                 null ||
                                                                             (acc.session_reset_at !==
@@ -1241,7 +1287,11 @@ function EditAccountModal({
                     <p className="text-fog-400 text-xs">Rotation policy for this account.</p>
                     <Field
                         label="5-hour rotation threshold"
-                        hint="5-hour utilization (0–1) at which this account rotates out."
+                        hint={
+                            account.has_five_hour_limit
+                                ? "5-hour utilization (0–1) at which this account rotates out."
+                                : "This plan has no 5-hour limit, so this threshold is not used."
+                        }
                     >
                         <TextInput
                             type="number"

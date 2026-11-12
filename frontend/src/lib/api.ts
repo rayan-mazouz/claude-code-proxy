@@ -23,6 +23,7 @@ import {
     AuthProfile,
     DashboardAnalytics,
     DashboardMember,
+    LimitsReport,
     UserLookup,
     User,
     Preset,
@@ -113,7 +114,7 @@ interface RequestOptions {
     skipAuthRedirect?: boolean;
 }
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
     const { method = "GET", body, skipAuthRedirect = false } = options;
 
     const headers: Record<string, string> = {
@@ -462,6 +463,16 @@ export const api = {
         const res = await request<{ models: string[] }>("/v1/users/model-options");
         return res.models;
     },
+    // Effort levels enabled with the proxy's THINKING_LEVELS setting, lowest first.
+    async thinkingLevels(): Promise<ThinkingLevel[]> {
+        const res = await request<{ thinking_levels: ThinkingLevel[] }>("/v1/users/model-options");
+        return res.thinking_levels;
+    },
+    limits(userId?: string): Promise<LimitsReport> {
+        return request<LimitsReport>(
+            `/v1/stats/limits${userId ? `?user_id=${encodeURIComponent(userId)}` : ""}`,
+        );
+    },
     async presets(): Promise<Preset[]> {
         const res = await request<{ presets: Preset[] }>("/v1/presets");
         return res.presets;
@@ -497,10 +508,8 @@ export const api = {
             rate_limit_per_minute?: number | null;
             rate_limit_per_hour?: number | null;
             rate_limit_per_day?: number | null;
-            monthly_token_budget?: number | null;
-            lifetime_token_budget?: number | null;
-            monthly_spend_budget_usd?: number | null;
-            lifetime_spend_budget_usd?: number | null;
+            five_hour_limit_budget?: number | null;
+            weekly_limit_budget?: number | null;
             model_overrides?: Record<string, string>;
             allowed_thinking_levels?: ThinkingLevel[];
             preset_id?: string | null;
@@ -520,10 +529,8 @@ export const api = {
                 rate_limit_per_minute: opts.rate_limit_per_minute ?? null,
                 rate_limit_per_hour: opts.rate_limit_per_hour ?? null,
                 rate_limit_per_day: opts.rate_limit_per_day ?? null,
-                monthly_token_budget: opts.monthly_token_budget ?? null,
-                lifetime_token_budget: opts.lifetime_token_budget ?? null,
-                monthly_spend_budget_usd: opts.monthly_spend_budget_usd ?? null,
-                lifetime_spend_budget_usd: opts.lifetime_spend_budget_usd ?? null,
+                five_hour_limit_budget: opts.five_hour_limit_budget ?? null,
+                weekly_limit_budget: opts.weekly_limit_budget ?? null,
                 model_overrides: opts.model_overrides ?? {},
                 allowed_thinking_levels: opts.allowed_thinking_levels,
                 preset_id: opts.preset_id,
@@ -548,10 +555,9 @@ export const api = {
             rate_limit_per_minute?: number;
             rate_limit_per_hour?: number;
             rate_limit_per_day?: number;
-            monthly_token_budget?: number;
-            lifetime_token_budget?: number;
-            monthly_spend_budget_usd?: number;
-            lifetime_spend_budget_usd?: number;
+            // 0 clears a cap.
+            five_hour_limit_budget?: number;
+            weekly_limit_budget?: number;
             model_overrides?: Record<string, string>;
             allowed_thinking_levels?: ThinkingLevel[];
             allowed_models?: string[] | null;
@@ -580,7 +586,8 @@ export const api = {
         opts: {
             label?: string;
             rate_limit_per_minute?: number | null;
-            monthly_token_budget?: number | null;
+            five_hour_limit_budget?: number | null;
+            weekly_limit_budget?: number | null;
         } = {},
     ) {
         return request<ApiKeyCreated>(`/v1/users/${userId}/keys`, {
@@ -588,7 +595,8 @@ export const api = {
             body: {
                 label: opts.label && opts.label.trim() !== "" ? opts.label.trim() : null,
                 rate_limit_per_minute: opts.rate_limit_per_minute ?? null,
-                monthly_token_budget: opts.monthly_token_budget ?? null,
+                five_hour_limit_budget: opts.five_hour_limit_budget ?? null,
+                weekly_limit_budget: opts.weekly_limit_budget ?? null,
             },
         });
     },
@@ -599,7 +607,8 @@ export const api = {
             label?: string;
             active?: boolean;
             rate_limit_per_minute?: number;
-            monthly_token_budget?: number;
+            five_hour_limit_budget?: number;
+            weekly_limit_budget?: number;
         },
     ): Promise<ApiKey> {
         const res = await request<{ api_key: ApiKey }>(`/v1/users/${userId}/keys/${keyId}`, {

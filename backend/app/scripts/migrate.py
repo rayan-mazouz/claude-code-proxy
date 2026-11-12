@@ -100,6 +100,10 @@ def sync_canonical_schema() -> None:
             connection.execute(text("ALTER TABLE accounts ADD COLUMN spare_capacity_tracking_json TEXT NOT NULL DEFAULT '{}'"))
         if "quota_attribution_json" not in account_columns:
             connection.execute(text("ALTER TABLE accounts ADD COLUMN quota_attribution_json TEXT NOT NULL DEFAULT '{}'"))
+        if "has_five_hour_limit" not in account_columns:
+            connection.execute(text("ALTER TABLE accounts ADD COLUMN has_five_hour_limit BOOLEAN NOT NULL DEFAULT TRUE"))
+        if "scoped_limits_json" not in account_columns:
+            connection.execute(text("ALTER TABLE accounts ADD COLUMN scoped_limits_json TEXT NOT NULL DEFAULT '[]'"))
 
         # Automatic egress rotation is intentionally disabled. Persist the
         # first enabled configured target for every account so restored or
@@ -125,10 +129,16 @@ def sync_canonical_schema() -> None:
             "monthly_spend_budget_usd": "DOUBLE PRECISION",
             "lifetime_spend_budget_usd": "DOUBLE PRECISION",
             "model_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
+            "five_hour_limit_budget": "DOUBLE PRECISION",
+            "weekly_limit_budget": "DOUBLE PRECISION",
         }
         for column_name, column_type in user_additions.items():
             if column_name not in user_columns:
                 connection.execute(text(f"ALTER TABLE users ADD COLUMN {column_name} {column_type}"))
+        key_columns = {column["name"] for column in inspector.get_columns("api_keys")}
+        for column_name in ("five_hour_limit_budget", "weekly_limit_budget"):
+            if column_name not in key_columns:
+                connection.execute(text(f"ALTER TABLE api_keys ADD COLUMN {column_name} DOUBLE PRECISION"))
         preset_columns = {
             "allowed_models_json": "TEXT",
             "preset_id": "UUID",

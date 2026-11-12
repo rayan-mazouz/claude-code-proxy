@@ -14,6 +14,7 @@ from .me import router as me_router
 from .notifications import router as notifications_router
 from .presets import router as presets_router
 from .proxy import router as proxy_router
+from .settings import router as settings_router
 from .stats import router as stats_router
 from .team import router as team_router
 from .users import router as users_router
@@ -35,5 +36,6 @@ main_router.include_router(lookups_router)
 main_router.include_router(events_router)
 main_router.include_router(proxy_router)
 main_router.include_router(team_router)
+main_router.include_router(settings_router)
 
 __all__ = ["main_router"]

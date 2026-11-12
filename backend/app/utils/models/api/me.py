@@ -8,6 +8,15 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from app.utils.models.api.limits import LimitBudget, QuotaUsage
+
+
+class OwnLimits(BaseModel):
+    """The caller's share of the accounts' limits and its limit budget (1.0 = one account's full window)."""
+
+    usage: QuotaUsage
+    budget: LimitBudget
+
 
 class PoolWindow(BaseModel):
     """One quota window aggregated across available accounts."""
@@ -36,6 +45,9 @@ class MeUsageResponse(BaseModel):
     tokens_today: int
     requests_this_month: int
     tokens_this_month: int
-    monthly_token_budget: Optional[int]
-    tokens_remaining_this_month: Optional[int]
+    # Retired token budgets; always null. Limit budgets are reported in key_limits / user_limits.
+    monthly_token_budget: Optional[int] = None
+    tokens_remaining_this_month: Optional[int] = None
+    key_limits: Optional[OwnLimits] = None
+    user_limits: Optional[OwnLimits] = None
     pool: Optional[PoolStatus]

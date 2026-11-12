@@ -10,8 +10,9 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.utils import security, usage
+from app.utils import limits_report, quota_attribution, rotation, security, usage
 from app.utils.models.api import MeUsageResponse, PoolStatus, PoolWindow
+from app.utils.models.api.me import OwnLimits
 from app.utils.postgres import AccountDb, ApiKeyDb, UsageRecordDb, UserDb, get_db
 
 router = APIRouter(tags=["Me"], prefix="/me")
@@ -66,8 +67,9 @@ def build_pool_status(db: Session, now: datetime | None = None) -> PoolStatus | 
     if not active_accounts:
         return None
 
+    # Current Max plans have no 5-hour window; they are left out rather than counted as unknown.
     five_hour = _aggregate_window(
-        active_accounts,
+        [account for account in active_accounts if rotation.has_five_hour_limit(account)],
         "session_used_pct",
         "session_reset_at",
         now,
@@ -118,11 +120,9 @@ def my_usage(
     tokens_today, requests_today = int(tokens_today or 0), int(requests_today or 0)
     tokens_month, requests_month = int(tokens_month or 0), int(requests_month or 0)
 
-    remaining = None
-    if key.monthly_token_budget and key.monthly_token_budget > 0:
-        remaining = max(key.monthly_token_budget - tokens_month, 0)
-
     pool = build_pool_status(db, now)
+    key_usage = quota_attribution.shares(db, "keys", [key.id], now)[str(key.id)]
+    user_usage = quota_attribution.shares(db, "users", [key.user_id], now)[str(key.user_id)]
 
     return MeUsageResponse(
         user=user.name if user is not None else "",
@@ -131,7 +131,9 @@ def my_usage(
         tokens_today=tokens_today,
         requests_this_month=requests_month,
         tokens_this_month=tokens_month,
-        monthly_token_budget=key.monthly_token_budget,
-        tokens_remaining_this_month=remaining,
+        monthly_token_budget=None,
+        tokens_remaining_this_month=None,
+        key_limits=OwnLimits(usage=limits_report.quota_usage(key_usage), budget=limits_report.budget(key)),
+        user_limits=OwnLimits(usage=limits_report.quota_usage(user_usage), budget=limits_report.budget(user)) if user is not None else None,
         pool=pool,
     )

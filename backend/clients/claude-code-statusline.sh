@@ -13,6 +13,7 @@
 #
 # Data sources:
 #   - 5h / 7d % + reset timers ......... GET /v1/me/usage (disk-cached 30s; degrades quietly if unreachable)
+#   - budget key/user 5h|7d % .......... same response; share of the limit budget used, only when one is set
 #   - model name + context window ...... Claude Code stdin (model.display_name, context_window.*)
 #   - cache 4m23s / COLD ............... tail-read of the active transcript JSONL (TTL auto-detected 1h vs 5m)
 #   - project / branch / lines / ⏱ ..... stdin workspace+cost, plus a 5s-cached `git` for branch & dirty dot
@@ -131,6 +132,23 @@ if [ -n "$base" ] && [ -n "$token" ]; then
       eta="$(eta_until "$w_reset")"; [ -n "$eta" ] && seg+=" $(paint "$DIM" "⏰$(fmt_eta "$eta")")"
       [ -n "$ratelimit_seg" ] && ratelimit_seg+="$(paint "$DIM" ' │ ')"
       ratelimit_seg+="$seg"
+    fi
+    # Limit budgets (share of one account's window), key first, then user; only shown when one is set.
+    budget_seg=""
+    for scope in key user; do
+      for win in five_hour weekly; do
+        cap="$(jq -r ".${scope}_limits.budget.${win} // empty" "$usage_cache" 2>/dev/null)"
+        [ -n "$cap" ] || continue
+        used="$(jq -r ".${scope}_limits.usage.${win}.used_pct // 0" "$usage_cache" 2>/dev/null)"
+        bp=$(awk -v u="$used" -v c="$cap" 'BEGIN{ if (c > 0) printf "%d", u/c*100+0.5; else print 0 }')
+        label="$([ "$win" = five_hour ] && echo 5h || echo 7d)"
+        [ -n "$budget_seg" ] && budget_seg+=" "
+        budget_seg+="$(paint "$DIM" "${scope} ${label}") $(paint "$(sev_color "$bp")" "${bp}%")"
+      done
+    done
+    if [ -n "$budget_seg" ]; then
+      [ -n "$ratelimit_seg" ] && ratelimit_seg+="$(paint "$DIM" ' │ ')"
+      ratelimit_seg+="$(paint "$DIM" 'budget ')${budget_seg}"
     fi
   fi
 fi

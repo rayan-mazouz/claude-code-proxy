@@ -140,7 +140,16 @@ _ACCOUNT_HARD_LIMIT_TEMPLATE = (
     "Traffic is moving to the next available account."
 )
 
+_USER_TOKEN_BUDGET_TEMPLATE = (
+    "🚫 Proxy user monthly budget exhausted\n\nUser: {{ user_name }}\nBudget: {{ limit }} tokens\nDetected: {{ event_time }}"
+)
+_KEY_TOKEN_BUDGET_TEMPLATE = (
+    "🚫 API key monthly budget exhausted\n\nUser: {{ user_name }}\nKey: {{ key_label }}\nBudget: {{ limit }} tokens\nDetected: {{ event_time }}"
+)
+
 LEGACY_DEFAULT_TEMPLATES: dict[str, tuple[str, ...]] = {
+    "user_monthly_budget": (_USER_TOKEN_BUDGET_TEMPLATE,),
+    "api_key_monthly_budget": (_KEY_TOKEN_BUDGET_TEMPLATE,),
     "account_added": (_ACCOUNT_ADDED_TEMPLATE_V1, _ACCOUNT_ADDED_TEMPLATE_V2),
     "account_quota_threshold": (_ACCOUNT_QUOTA_THRESHOLD_TEMPLATE_V1, _ACCOUNT_QUOTA_THRESHOLD_TEMPLATE_V2),
     "account_hard_limit": (_ACCOUNT_HARD_LIMIT_TEMPLATE_V1, _ACCOUNT_HARD_LIMIT_TEMPLATE_V2),
@@ -280,16 +289,20 @@ EVENTS: dict[str, EventDefinition] = {
         cooldown_seconds=3600,
         variables=COMMON_VARIABLES + ("user_name", "limit"),
     ),
+    # The event keys predate limit budgets and are kept so existing rules keep their settings.
     "user_monthly_budget": EventDefinition(
-        title="User monthly token budget exhausted",
+        title="User limit budget exhausted",
         description=(
-            "Sent when a user's combined month-to-date token usage reaches their configured budget and the next request "
-            "is rejected with 403. Repeats are controlled by the event cooldown."
+            "Sent when a user's share of the accounts' 5-hour or weekly limits reaches their limit budget and the next "
+            "request is rejected with 429 until the window resets. Repeats are controlled by the event cooldown."
         ),
-        default_template="🚫 Proxy user monthly budget exhausted\n\nUser: {{ user_name }}\nBudget: {{ limit }} tokens\nDetected: {{ event_time }}",
+        default_template=(
+            "🚫 Proxy user limit budget exhausted\n\nUser: {{ user_name }}\nWindow: {{ window }}\n"
+            "Used: {{ used }} of {{ limit }}\nResets: {{ reset_at }}\nDetected: {{ event_time }}"
+        ),
         default_enabled=False,
         cooldown_seconds=3600,
-        variables=COMMON_VARIABLES + ("user_name", "limit"),
+        variables=COMMON_VARIABLES + ("user_name", "limit", "used", "window", "reset_at"),
     ),
     "api_key_rate_limit": EventDefinition(
         title="API key request rate limit exceeded",
@@ -306,18 +319,18 @@ EVENTS: dict[str, EventDefinition] = {
         variables=COMMON_VARIABLES + ("user_name", "key_label", "key_prefix", "limit"),
     ),
     "api_key_monthly_budget": EventDefinition(
-        title="API key monthly token budget exhausted",
+        title="API key limit budget exhausted",
         description=(
-            "Sent when one API key reaches its month-to-date token budget and the next request is rejected with 403. "
-            "The owning user's other keys remain available."
+            "Sent when one API key's share of the accounts' 5-hour or weekly limits reaches its limit budget and the next "
+            "request is rejected with 429 until the window resets. The owning user's other keys remain available."
         ),
         default_template=(
-            "🚫 API key monthly budget exhausted\n\nUser: {{ user_name }}\nKey: {{ key_label }}\n"
-            "Budget: {{ limit }} tokens\nDetected: {{ event_time }}"
+            "🚫 API key limit budget exhausted\n\nUser: {{ user_name }}\nKey: {{ key_label }}\nWindow: {{ window }}\n"
+            "Used: {{ used }} of {{ limit }}\nResets: {{ reset_at }}\nDetected: {{ event_time }}"
         ),
         default_enabled=False,
         cooldown_seconds=3600,
-        variables=COMMON_VARIABLES + ("user_name", "key_label", "key_prefix", "limit"),
+        variables=COMMON_VARIABLES + ("user_name", "key_label", "key_prefix", "limit", "used", "window", "reset_at"),
     ),
     "daily_usage_report": EventDefinition(
         title="Daily usage report",
@@ -430,6 +443,10 @@ def ensure_default_rules(db: Session, channel: NotificationChannelDb) -> list[No
     return [existing[event_type] for event_type in EVENTS]
 
 
+def format_time(value: Optional[datetime]) -> str:
+    return _format_time(value)
+
+
 def _format_time(value: Optional[datetime]) -> str:
     if value is None:
         return "Unknown"
@@ -459,6 +476,7 @@ def _pool_counts(db: Session) -> tuple[int, int]:
 def account_context(db: Session, account: AccountDb, dashboard_url: str = "") -> dict[str, object]:
     total, usable = _pool_counts(db)
     effective_window = rotation.blocking_quota_window(account) or rotation.most_used_quota_window(account)
+    has_five_hour = rotation.has_five_hour_limit(account)
     return {
         "event_time": _format_time(utcnow()),
         "dashboard_url": dashboard_url,
@@ -471,18 +489,19 @@ def account_context(db: Session, account: AccountDb, dashboard_url: str = "") ->
         # render while new templates use explicit five-hour/weekly variables.
         "usage_percent": round(((effective_window.used_pct if effective_window else None) or 0) * 100, 1),
         "limiting_window": effective_window.label if effective_window else "Unknown",
-        "five_hour_usage_percent": round((account.session_used_pct or 0) * 100, 1),
-        "five_hour_reset_at": _format_time(account.session_reset_at),
+        # Accounts without a 5-hour window render these as "—".
+        "five_hour_usage_percent": round((account.session_used_pct or 0) * 100, 1) if has_five_hour else None,
+        "five_hour_reset_at": _format_time(account.session_reset_at) if has_five_hour else None,
         "weekly_usage_percent": round((account.weekly_used_pct or 0) * 100, 1),
         "weekly_reset_at": _format_time(account.weekly_reset_at),
         "monthly_usage_percent": None if account.monthly_used_pct is None else round(account.monthly_used_pct * 100, 1),
         "monthly_reset_at": _format_time(account.monthly_reset_at),
-        "five_hour_rotation_threshold": round(account.five_hour_rotation_threshold * 100, 1),
+        "five_hour_rotation_threshold": round(account.five_hour_rotation_threshold * 100, 1) if has_five_hour else None,
         "weekly_rotation_threshold": round(account.weekly_rotation_threshold * 100, 1),
         "rotation_threshold": round(effective_window.threshold * 100, 1) if effective_window else round(account.rotation_threshold * 100, 1),
         "reset_at": _format_time(effective_window.reset_at if effective_window else None),
-        "session_usage_percent": round((account.session_used_pct or 0) * 100, 1),
-        "session_reset_at": _format_time(account.session_reset_at),
+        "session_usage_percent": round((account.session_used_pct or 0) * 100, 1) if has_five_hour else None,
+        "session_reset_at": _format_time(account.session_reset_at) if has_five_hour else None,
         "usable_accounts": usable,
         "total_accounts": total,
     }
@@ -697,11 +716,12 @@ def enqueue_client_limit(
     event_type: str,
     *,
     user_name: str,
-    limit: int,
+    limit: int | str,
     dedupe_key: str,
     key_label: Optional[str] = None,
     key_prefix: Optional[str] = None,
     dashboard_url: str = "",
+    extra: Optional[Mapping[str, object]] = None,
 ) -> int:
     return enqueue_event(
         db,
@@ -713,6 +733,7 @@ def enqueue_client_limit(
             "key_label": key_label or "Unlabelled key",
             "key_prefix": key_prefix,
             "limit": limit,
+            **(extra or {}),
         },
         dedupe_key,
     )
@@ -930,7 +951,8 @@ def account_status_messages(
 
     blocks: list[str] = []
     for account in selected:
-        five_hour_remaining = _usage_remaining(account.session_used_pct)
+        has_five_hour = rotation.has_five_hour_limit(account)
+        five_hour_remaining = _usage_remaining(account.session_used_pct) if has_five_hour else "No 5-hour limit"
         weekly_remaining = _usage_remaining(account.weekly_used_pct)
         five_hour_reset_line = (
             f"5-hour reset: {_format_zoned_time(account.session_reset_at, timezone_name)}\n" if account.session_reset_at is not None else ""
@@ -949,8 +971,8 @@ def account_status_messages(
             f"{five_hour_reset_line}"
             f"Weekly remaining: {weekly_remaining}\n"
             f"{weekly_reset_line}"
-            f"5-hour rotation threshold: {account.five_hour_rotation_threshold * 100:.1f}%\n"
-            f"Weekly rotation threshold: {account.weekly_rotation_threshold * 100:.1f}%"
+            + (f"5-hour rotation threshold: {account.five_hour_rotation_threshold * 100:.1f}%\n" if has_five_hour else "")
+            + f"Weekly rotation threshold: {account.weekly_rotation_threshold * 100:.1f}%"
         )
 
     messages: list[str] = []

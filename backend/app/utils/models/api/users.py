@@ -13,10 +13,39 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.model_catalog import configured_model_ids
 from app.utils import presets, request_policy
-from app.utils.thinking import THINKING_LEVELS
+from app.utils.models.api.limits import AccountQuotaUsage, LimitBudget, QuotaUsage
+from app.utils.thinking import KNOWN_THINKING_LEVELS, ordered_levels, thinking_levels
 
-ThinkingLevel = Literal["low", "medium", "high", "max"]
+# Effort levels are validated against THINKING_LEVELS at request time, so the setting can change without a release.
+ThinkingLevel = str
 ThinkingMode = Literal["disabled", "enabled", "adaptive"]
+
+
+def normalize_thinking_levels(values):
+    """Validate an effort-level list against the configured levels and return it in canonical order.
+
+    Levels the API knows but THINKING_LEVELS no longer enables are dropped rather than rejected, so a policy
+    saved before the setting changed can still be edited; a list left empty, or naming an unknown level, is invalid.
+    """
+    if values is None:
+        return None
+    if not isinstance(values, list) or not values or any(not isinstance(value, str) for value in values):
+        raise ValueError("Thinking levels must be a non-empty list")
+    normalized = [value.strip().lower() for value in values]
+    unknown = sorted(set(normalized) - set(KNOWN_THINKING_LEVELS))
+    if unknown:
+        raise ValueError(f"Unknown thinking levels: {', '.join(unknown)}")
+    enabled = ordered_levels(level for level in normalized if level in thinking_levels())
+    if not enabled:
+        raise ValueError(f"Choose at least one enabled thinking level ({', '.join(thinking_levels())})")
+    return enabled
+
+
+def normalize_level_matrix(values):
+    """Per-model thinking levels, with levels that are no longer enabled dropped (see normalize_thinking_levels)."""
+    if not isinstance(values, dict):
+        return values
+    return _normalize_model_matrix({model: normalize_thinking_levels(levels) for model, levels in values.items()}, thinking_levels())
 
 
 def _normalize_model_values(values):
@@ -61,21 +90,6 @@ def _normalize_model_overrides(values):
     return normalized
 
 
-class QuotaShare(BaseModel):
-    """A user's share of one provider quota window, summed across accounts (1.0 = one account's full window)."""
-
-    used_pct: float
-    reset_at: Optional[datetime]  # earliest reset among the windows the user has used
-
-
-class QuotaUsage(BaseModel):
-    """Null for a window kind no account currently has open."""
-
-    five_hour: Optional[QuotaShare]
-    weekly: Optional[QuotaShare]
-    monthly: Optional[QuotaShare]
-
-
 class User(BaseModel):
     """A proxy user. Identity only -- the actual credentials live on its API keys."""
 
@@ -89,10 +103,8 @@ class User(BaseModel):
     rate_limit_per_minute: Optional[int]  # requests/min across all the user's keys; null/0 = unlimited
     rate_limit_per_hour: Optional[int]  # requests/hour across all keys; null/0 = unlimited
     rate_limit_per_day: Optional[int]  # requests/24 hours across all keys; null/0 = unlimited
-    monthly_token_budget: Optional[int]  # tokens/calendar month across all the user's keys; null/0 = unlimited
-    lifetime_token_budget: Optional[int]
-    monthly_spend_budget_usd: Optional[float]
-    lifetime_spend_budget_usd: Optional[float]
+    # Caps on the user's share of the accounts' 5-hour / weekly windows across all keys (1.0 = one account's window).
+    limit_budget: LimitBudget
     model_overrides: Dict[str, str]
     allowed_thinking_levels: List[ThinkingLevel]
     allowed_models: Optional[List[str]]
@@ -110,6 +122,7 @@ class User(BaseModel):
     total_spend_usd: float
     monthly_spend_usd: float
     quota_usage: QuotaUsage
+    quota_usage_by_account: List[AccountQuotaUsage] = Field(default_factory=list)
 
     @classmethod
     def from_db(
@@ -122,7 +135,8 @@ class User(BaseModel):
         total_spend_usd: float,
         monthly_spend_usd: float,
         monthly_reset_at: datetime,
-        quota_usage: dict,
+        quota_usage: QuotaUsage,
+        quota_usage_by_account: Optional[List[AccountQuotaUsage]] = None,
     ) -> User:
         return cls(
             id=user_db.id,
@@ -135,10 +149,7 @@ class User(BaseModel):
             rate_limit_per_minute=user_db.rate_limit_per_minute,
             rate_limit_per_hour=user_db.rate_limit_per_hour,
             rate_limit_per_day=user_db.rate_limit_per_day,
-            monthly_token_budget=user_db.monthly_token_budget,
-            lifetime_token_budget=user_db.lifetime_token_budget,
-            monthly_spend_budget_usd=user_db.monthly_spend_budget_usd,
-            lifetime_spend_budget_usd=user_db.lifetime_spend_budget_usd,
+            limit_budget=LimitBudget(five_hour=user_db.five_hour_limit_budget or None, weekly=user_db.weekly_limit_budget or None),
             model_overrides=request_policy.decode_model_overrides(user_db.model_overrides_json),
             allowed_thinking_levels=user_db.allowed_thinking_levels,
             allowed_models=json.loads(user_db.allowed_models_json) if user_db.allowed_models_json else None,
@@ -155,12 +166,8 @@ class User(BaseModel):
             monthly_reset_at=monthly_reset_at,
             total_spend_usd=round(total_spend_usd, 6),
             monthly_spend_usd=round(monthly_spend_usd, 6),
-            quota_usage=QuotaUsage(
-                **{
-                    key: QuotaShare(used_pct=round(share.used_pct, 6), reset_at=share.reset_at) if share else None
-                    for key, share in quota_usage.items()
-                }
-            ),
+            quota_usage=quota_usage,
+            quota_usage_by_account=quota_usage_by_account or [],
         )
 
 
@@ -173,12 +180,19 @@ class ApiKey(BaseModel):
     key_prefix: str
     active: bool
     rate_limit_per_minute: Optional[int]  # null = use the global default; 0 = unlimited
-    monthly_token_budget: Optional[int]  # null/0 = unlimited
+    limit_budget: LimitBudget  # caps for this key alone, in the same units as the user's
+    quota_usage: QuotaUsage = Field(default_factory=QuotaUsage)
+    quota_usage_by_account: List[AccountQuotaUsage] = Field(default_factory=list)
     last_used_at: Optional[datetime]
     created_at: datetime
 
     @classmethod
-    def from_db(cls, key_db) -> ApiKey:
+    def from_db(
+        cls,
+        key_db,
+        quota_usage: Optional[QuotaUsage] = None,
+        quota_usage_by_account: Optional[List[AccountQuotaUsage]] = None,
+    ) -> ApiKey:
         return cls(
             id=key_db.id,
             user_id=key_db.user_id,
@@ -186,7 +200,9 @@ class ApiKey(BaseModel):
             key_prefix=key_db.key_prefix,
             active=key_db.active,
             rate_limit_per_minute=key_db.rate_limit_per_minute,
-            monthly_token_budget=key_db.monthly_token_budget,
+            limit_budget=LimitBudget(five_hour=key_db.five_hour_limit_budget or None, weekly=key_db.weekly_limit_budget or None),
+            quota_usage=quota_usage or QuotaUsage(),
+            quota_usage_by_account=quota_usage_by_account or [],
             last_used_at=key_db.last_used_at,
             created_at=key_db.created_at,
         )
@@ -229,10 +245,9 @@ class CreateUserRequest(BaseModel):
     rate_limit_per_minute: Optional[int] = Field(default=None, ge=0)  # null/0 = unlimited
     rate_limit_per_hour: Optional[int] = Field(default=None, ge=0)
     rate_limit_per_day: Optional[int] = Field(default=None, ge=0)
-    monthly_token_budget: Optional[int] = None  # tokens/calendar month across all the user's keys; null/0 = unlimited
-    lifetime_token_budget: Optional[int] = Field(default=None, ge=0)
-    monthly_spend_budget_usd: Optional[float] = Field(default=None, ge=0)
-    lifetime_spend_budget_usd: Optional[float] = Field(default=None, ge=0)
+    # Share of the accounts' 5-hour / weekly windows (1.0 = one account's full window); null/0 = no cap.
+    five_hour_limit_budget: Optional[float] = Field(default=None, ge=0, le=1000)
+    weekly_limit_budget: Optional[float] = Field(default=None, ge=0, le=1000)
     model_overrides: Dict[str, str] = Field(default_factory=dict)
     preset_id: Optional[uuid.UUID] = None
     allowed_models: Optional[List[str]] = Field(default=None, min_length=1)
@@ -253,14 +268,19 @@ class CreateUserRequest(BaseModel):
     @field_validator("model_thinking_levels", mode="before")
     @classmethod
     def normalize_level_matrix(cls, values):
-        return _normalize_model_matrix(values, THINKING_LEVELS)
+        return normalize_level_matrix(values)
 
     @field_validator("model_thinking_modes", mode="before")
     @classmethod
     def normalize_mode_matrix(cls, values):
         return _normalize_model_matrix(values, ("disabled", "enabled", "adaptive"))
 
-    allowed_thinking_levels: List[ThinkingLevel] = Field(default_factory=lambda: list(THINKING_LEVELS))
+    allowed_thinking_levels: List[ThinkingLevel] = Field(default_factory=lambda: list(thinking_levels()))
+
+    @field_validator("allowed_thinking_levels", mode="before")
+    @classmethod
+    def normalize_levels(cls, values):
+        return normalize_thinking_levels(values)
 
 
 # PUT /users/{user_id}
@@ -278,10 +298,8 @@ class UpdateUserRequest(BaseModel):
     rate_limit_per_minute: Optional[int] = Field(default=None, ge=0)
     rate_limit_per_hour: Optional[int] = Field(default=None, ge=0)
     rate_limit_per_day: Optional[int] = Field(default=None, ge=0)
-    monthly_token_budget: Optional[int] = None
-    lifetime_token_budget: Optional[int] = Field(default=None, ge=0)
-    monthly_spend_budget_usd: Optional[float] = Field(default=None, ge=0)
-    lifetime_spend_budget_usd: Optional[float] = Field(default=None, ge=0)
+    five_hour_limit_budget: Optional[float] = Field(default=None, ge=0, le=1000)
+    weekly_limit_budget: Optional[float] = Field(default=None, ge=0, le=1000)
     model_overrides: Optional[Dict[str, str]] = None
     allowed_models: Optional[List[str]] = Field(default=None, min_length=1)
     allowed_thinking_modes: Optional[List[ThinkingMode]] = Field(default=None, min_length=1)
@@ -301,7 +319,7 @@ class UpdateUserRequest(BaseModel):
     @field_validator("model_thinking_levels", mode="before")
     @classmethod
     def normalize_level_matrix(cls, values):
-        return _normalize_model_matrix(values, THINKING_LEVELS)
+        return normalize_level_matrix(values)
 
     @field_validator("model_thinking_modes", mode="before")
     @classmethod
@@ -309,6 +327,11 @@ class UpdateUserRequest(BaseModel):
         return _normalize_model_matrix(values, ("disabled", "enabled", "adaptive"))
 
     allowed_thinking_levels: Optional[List[ThinkingLevel]] = None
+
+    @field_validator("allowed_thinking_levels", mode="before")
+    @classmethod
+    def normalize_levels(cls, values):
+        return normalize_thinking_levels(values)
 
 
 class UserResponse(BaseModel):
@@ -322,7 +345,8 @@ class CreateApiKeyRequest(BaseModel):
     # A label is required so every credential is identifiable in the dashboard and audit logs.
     label: str = Field(..., min_length=1, max_length=120)
     rate_limit_per_minute: Optional[int] = None  # requests/min; null = global default, 0 = unlimited
-    monthly_token_budget: Optional[int] = None  # tokens/calendar month; null/0 = unlimited
+    five_hour_limit_budget: Optional[float] = Field(default=None, ge=0, le=1000)  # null/0 = no cap
+    weekly_limit_budget: Optional[float] = Field(default=None, ge=0, le=1000)
 
     @field_validator("label")
     @classmethod
@@ -341,7 +365,8 @@ class UpdateApiKeyRequest(BaseModel):
     label: Optional[str] = None
     active: Optional[bool] = None
     rate_limit_per_minute: Optional[int] = None
-    monthly_token_budget: Optional[int] = None
+    five_hour_limit_budget: Optional[float] = Field(default=None, ge=0, le=1000)  # send 0 to clear
+    weekly_limit_budget: Optional[float] = Field(default=None, ge=0, le=1000)
 
 
 class ApiKeyResponse(BaseModel):

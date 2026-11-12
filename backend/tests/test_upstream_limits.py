@@ -11,7 +11,7 @@ def test_anthropic_429_body_persists_authoritative_reset(seed_account):
 
     with SessionFactory() as db:
         account = db.get(AccountDb, account_id)
-        reached, reset_at = rotation.apply_rate_limit_body(
+        reached, reset_at, _scoped = rotation.apply_rate_limit_body(
             account,
             json.dumps({"type": "error", "error": {"type": "rate_limit_error", "resets_in_seconds": 3600}}).encode(),
         )

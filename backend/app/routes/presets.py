@@ -10,9 +10,15 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.utils import presets, request_policy, security
-from app.utils.models.api.users import _normalize_model_matrix, _normalize_model_overrides, _normalize_model_values
+from app.utils.models.api.users import (
+    _normalize_model_matrix,
+    _normalize_model_overrides,
+    _normalize_model_values,
+    normalize_level_matrix,
+    normalize_thinking_levels,
+)
 from app.utils.postgres import PresetDb, UserDb, get_db
-from app.utils.thinking import THINKING_LEVELS
+from app.utils.thinking import thinking_levels
 
 router = APIRouter(tags=["Presets"], prefix="/presets")
 THINKING_MODES = ("disabled", "enabled", "adaptive")
@@ -22,7 +28,7 @@ class PresetPayload(BaseModel):
     fallback_enabled: bool = False
     name: str = Field(min_length=1, max_length=120)
     allowed_models: list[str] | None = Field(default=None, min_length=1)
-    allowed_thinking_levels: list[str] = Field(default_factory=lambda: list(THINKING_LEVELS), min_length=1)
+    allowed_thinking_levels: list[str] = Field(default_factory=lambda: list(thinking_levels()), min_length=1)
     allowed_thinking_modes: list[str] = Field(default_factory=lambda: list(THINKING_MODES), min_length=1)
     model_overrides: dict[str, str] = Field(default_factory=dict)
     model_thinking_levels: dict[str, list[str]] = Field(default_factory=dict)
@@ -48,9 +54,7 @@ class PresetPayload(BaseModel):
     @field_validator("allowed_thinking_levels", mode="before")
     @classmethod
     def check_levels(cls, value):
-        if not isinstance(value, list) or not value or any(level not in THINKING_LEVELS for level in value):
-            raise ValueError("Invalid thinking levels")
-        return list(dict.fromkeys(value))
+        return normalize_thinking_levels(value)
 
     @field_validator("allowed_thinking_modes", mode="before")
     @classmethod
@@ -62,7 +66,7 @@ class PresetPayload(BaseModel):
     @field_validator("model_thinking_levels", mode="before")
     @classmethod
     def check_level_matrix(cls, value):
-        return _normalize_model_matrix(value, THINKING_LEVELS)
+        return normalize_level_matrix(value)
 
     @field_validator("model_thinking_modes", mode="before")
     @classmethod

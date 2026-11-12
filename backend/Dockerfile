@@ -27,5 +27,5 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY . .
 
 # Run as a non-root user (this image holds the Fernet key that decrypts pooled-account OAuth tokens).
-RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app /opt/venv
+RUN groupadd --gid 10001 appuser && useradd --create-home --uid 10001 --gid 10001 appuser && chown -R appuser:appuser /app /opt/venv
 USER appuser

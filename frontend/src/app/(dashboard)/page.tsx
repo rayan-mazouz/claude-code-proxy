@@ -5,7 +5,8 @@
 //   - Hero band: API-equivalent value delivered + tokens/requests, with the
 //     activity series (auto hourly/daily) pulled in alongside.
 //   - Infra strip: pool load and account inventory (not range-dependent).
-//   - Usage & limits, user analytics, request analytics and peak requests.
+//   - Pool status strip, Usage & limits (averages or per account), limit usage
+//     by user or key with budgets, user analytics, request analytics and peak requests.
 // Auto-refresh and the range selection both re-fetch every panel.
 // ---------------------------------------------------------------------------
 
@@ -31,6 +32,7 @@ import {
 } from "@/components/Charts";
 import { RequestAnalyticsCard } from "@/components/RequestAnalyticsCard";
 import { UsageLimitsCard } from "@/components/UsageLimitsCard";
+import { AccountLimitsTable, LimitSharesCard, PoolStatusStrip } from "@/components/LimitsOverview";
 import { RangePicker, resolveRange } from "@/components/RangePicker";
 import { useResource } from "@/lib/useResource";
 import { useStoredState } from "@/lib/useStoredState";
@@ -116,6 +118,7 @@ export default function OverviewPage() {
     const hourly = dashboard.data?.hourly ?? null;
     const modelMix = dashboard.data?.model_mix ?? null;
     const thinkingLevelMix = dashboard.data?.thinking_level_mix ?? null;
+    const limits = dashboard.data?.limits ?? null;
     const allUsers: UserLookup[] = dashboard.data?.lookups.users ?? [];
     const modelOptions: string[] = dashboard.data?.lookups.models ?? [];
     const analyticsError = dashboard.error;
@@ -395,7 +398,16 @@ export default function OverviewPage() {
                         </div>
                     </Card>
 
-                    <UsageLimitsCard stats={stats} />
+                    {limits ? <PoolStatusStrip report={limits} /> : null}
+
+                    <UsageLimitsCard
+                        stats={stats}
+                        perAccount={
+                            limits ? <AccountLimitsTable accounts={limits.accounts} /> : undefined
+                        }
+                    />
+
+                    {limits ? <LimitSharesCard report={limits} /> : null}
 
                     {modelMix && modelMix.users.some((user) => user.total_requests > 0) ? (
                         <UserInsightsCard modelData={modelMix} thinkingData={thinkingLevelMix} />

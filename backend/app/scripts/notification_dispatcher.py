@@ -3,7 +3,7 @@
 import time
 
 from app.logger import configure_logging, get_logger
-from app.utils import notifications
+from app.utils import config_watch, notifications
 from app.utils.postgres import get_db_cm
 
 logger = get_logger()
@@ -32,9 +32,12 @@ def poll_commands(offsets: dict[str, int]) -> int:
 def main() -> None:
     configure_logging()
     logger.info("Notification dispatcher started")
+    # Exits (status 0) when a restart-class setting changes, so Docker restarts the sidecar with the new config.
+    watcher = config_watch.RestartWatcher(log=logger.info)
     telegram_offsets: dict[str, int] = {}
     last_command_poll = 0.0
     while True:
+        watcher.exit_if_changed()
         try:
             enqueue_reports()
             processed = dispatch_available()

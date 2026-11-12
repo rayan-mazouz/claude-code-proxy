@@ -3,12 +3,11 @@
 #              on a fixed interval, so the dashboard stays current even for idle accounts.
 #              Run with: `python -m app.scripts.quota_refresher`.
 
-import time
 from datetime import datetime, timezone
 
 from app import config
 from app.logger import configure_logging, get_logger
-from app.utils import egress, events, notifications, oauth, provider_health, quota_attribution, rotation, spare_capacity, warmup
+from app.utils import config_watch, egress, events, notifications, oauth, provider_health, quota_attribution, rotation, spare_capacity, warmup
 from app.utils.models.api import ProviderHealth as ProviderHealthEnum
 from app.utils.postgres import AccountDb, get_db_cm
 
@@ -83,14 +82,16 @@ def refresh_once() -> None:
 
 def main() -> None:
     configure_logging()
-    interval = settings.QUOTA_REFRESH_INTERVAL_SECONDS
-    logger.info(f"Quota refresher started; interval={interval}s")
+    # Exits (status 0) when a restart-class setting changes, so Docker restarts the sidecar with the new config.
+    watcher = config_watch.RestartWatcher(log=logger.info)
+    logger.info(f"Quota refresher started; interval={settings.QUOTA_REFRESH_INTERVAL_SECONDS}s")
     while True:
         try:
             refresh_once()
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"Quota refresh cycle error: {exc}")
-        time.sleep(interval)
+        # Read every cycle so a dashboard edit applies without a restart.
+        watcher.sleep(settings.QUOTA_REFRESH_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":

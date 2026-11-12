@@ -21,6 +21,15 @@ services:
     image: claude-code-proxy/backend:latest
     command: uv run python -m app.scripts.migrate
     env_file: ./.env
+    environment:
+      CCP_CONFIG_FILE: /app/config/.env
+    volumes:
+      # The editable config file, mounted so edits made in the dashboard (or by hand) reach running processes.
+      # Its values outrank the environment Compose copied from env_file when it created the container.
+      - type: bind
+        source: ./.env
+        target: /app/config/.env
+        read_only: true
     # The dependency on Postgres is added by docker-compose.postgres.yml; with an external
     # database this one-shot just runs the migration against POSTGRES_HOST.
 
@@ -37,6 +46,13 @@ services:
     env_file: ./.env
     environment:
       DEPLOYMENT_SLOT: ${BG_SLOT:-stable}
+      CCP_CONFIG_FILE: /app/config/.env
+    volumes:
+      # Read-write: the dashboard Settings page rewrites this file in place (never by rename, which would detach
+      # the single-file bind mount). The file must be writable by the image's appuser (uid/gid 10001); see README.
+      - type: bind
+        source: ./.env
+        target: /app/config/.env
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -59,6 +75,15 @@ services:
     command: uv run python -m app.scripts.quota_refresher
     restart: unless-stopped
     env_file: ./.env
+    environment:
+      CCP_CONFIG_FILE: /app/config/.env
+    volumes:
+      # The editable config file, mounted so edits made in the dashboard (or by hand) reach running processes.
+      # Its values outrank the environment Compose copied from env_file when it created the container.
+      - type: bind
+        source: ./.env
+        target: /app/config/.env
+        read_only: true
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -76,6 +101,15 @@ services:
     command: uv run python -m app.scripts.notification_dispatcher
     restart: unless-stopped
     env_file: ./.env
+    environment:
+      CCP_CONFIG_FILE: /app/config/.env
+    volumes:
+      # The editable config file, mounted so edits made in the dashboard (or by hand) reach running processes.
+      # Its values outrank the environment Compose copied from env_file when it created the container.
+      - type: bind
+        source: ./.env
+        target: /app/config/.env
+        read_only: true
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -96,7 +130,12 @@ services:
     environment:
       BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK: "yes"
       BORG_RELOCATED_REPO_ACCESS_IS_OK: "yes"
+      CCP_CONFIG_FILE: /app/config/.env
     volumes:
+      - type: bind
+        source: ./.env
+        target: /app/config/.env
+        read_only: true
       - type: bind
         source: ${ARCHIVE_BORG_HOST_DIR:-/srv/claude-code-proxy/borg}
         target: /borg

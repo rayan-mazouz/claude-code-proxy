@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app import pricing
 from app.logger import get_logger
-from app.utils import rotation, security, usage
+from app.utils import limits_report, rotation, security, usage
 from app.utils.models.api import (
     AccountStatus,
     ActivityPoint,
@@ -38,6 +38,7 @@ from app.utils.models.api import (
     UserThinkingLevelMix,
     UserUsage,
 )
+from app.utils.models.api.limits import LimitsReport
 from app.utils.models.api.stats import ModelMixResponse, ModelSlice, UserModelMix
 from app.utils.postgres import AccountDb, AnthropicFallbackDb, ApiKeyDb, ProxyEventDb, UsageRecordDb, UserDb, get_db
 
@@ -183,7 +184,9 @@ def overview(
         resets = []
         for account in active_accounts:
             windows = rotation.quota_windows(account)
-            target = next(window for window in windows if window.key == key)
+            target = next((window for window in windows if window.key == key), None)
+            if target is None:
+                continue
             reset_at = utc(target.reset_at)
             if reset_at is None or reset_at <= now or not target.used_pct or target.used_pct <= 0:
                 continue
@@ -207,6 +210,9 @@ def overview(
     # consume.
     five_hour_values = []
     for account in active_accounts:
+        if not rotation.has_five_hour_limit(account):
+            # Max plans without a 5-hour window neither add to nor dilute the 5-hour average.
+            continue
         if account.weekly_used_pct is not None and account.weekly_used_pct >= 1.0:
             five_hour_values.append(1.0)
             continue
@@ -236,6 +242,7 @@ def overview(
     return OverviewResponse(
         total_accounts=len(accounts),
         active_accounts=len(active_accounts),
+        five_hour_limited_accounts=sum(1 for account in active_accounts if rotation.has_five_hour_limit(account)),
         usable_accounts=len(usable_accounts),
         five_hour_average_pct=five_hour_average_pct,
         weekly_average_pct=weekly_average_pct,
@@ -722,6 +729,19 @@ def thinking_level_mix(
     return ThinkingLevelMixResponse(users=users)
 
 
+@router.get("/limits", response_model=LimitsReport)
+def limits(
+    rng: TimeRange = Depends(TimeRange.get_request),  # noqa: B008
+    _: str = Depends(security.require_admin),  # noqa: B008
+    db: Session = Depends(get_db),  # noqa: B008
+) -> LimitsReport:
+    """Every account's provider windows, and each user's and key's share of them with their limit budgets.
+
+    Not range-dependent: the windows are the ones open now. A user filter narrows the users and keys listed.
+    """
+    return limits_report.build(db, user_id=rng.user_id)
+
+
 # Bound analytics concurrency per worker. Each read gets its own SQLAlchemy
 # session; inference credentials, routing state, and write paths are untouched.
 _dashboard_reads = ThreadPoolExecutor(max_workers=4, thread_name_prefix="dashboard-read")
@@ -750,6 +770,7 @@ def dashboard_analytics(
         "model_mix": model_mix,
         "thinking_level_mix": thinking_level_mix,
     }
+    computations["limits"] = limits
     futures = {name: _dashboard_reads.submit(_dashboard_read, compute, rng, _) for name, compute in computations.items()}
     result = {}
     for name, future in futures.items():

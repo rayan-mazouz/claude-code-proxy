@@ -7,7 +7,16 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Activity, BellRing, Boxes, Cable, LayoutDashboard, LogOut, Users } from "lucide-react";
+import {
+    Activity,
+    BellRing,
+    Boxes,
+    Cable,
+    LayoutDashboard,
+    LogOut,
+    Settings,
+    Users,
+} from "lucide-react";
 import { clearToken } from "@/lib/api";
 import { ClaudeLogo } from "./ClaudeLogo";
 
@@ -53,6 +62,13 @@ const NAV: NavItem[] = [
         permission: "analytics:read",
     },
     { href: "/team", label: "Team", icon: <Users {...ICON} />, permission: "team:members:read" },
+    // Owner-only: settings:* is never assignable to team members, so only the wildcard grants it.
+    {
+        href: "/settings",
+        label: "Settings",
+        icon: <Settings {...ICON} />,
+        permission: "settings:read",
+    },
 ];
 
 export function BrandMark() {

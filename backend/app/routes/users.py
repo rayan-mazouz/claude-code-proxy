@@ -1,6 +1,7 @@
 # Path: app/routes/users.py
 # Description: Proxy user management -- users own one or more API keys. Create/update/delete users, mint and manage
-#              their keys (one-time secret reveal), and report each user's month-to-date token/request usage. Admin-only.
+#              their keys (one-time secret reveal), and report each user's and key's usage, including their share of
+#              the accounts' provider limits. Admin-only.
 
 import json
 import uuid
@@ -13,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.logger import get_logger
 from app.model_catalog import configured_model_ids
-from app.utils import presets, quota_attribution, request_policy, security, usage
+from app.utils import limits_report, presets, quota_attribution, request_policy, security, usage
 from app.utils.models.api import (
     ApiKey,
     ApiKeyCreatedResponse,
@@ -30,6 +31,7 @@ from app.utils.models.api import (
     UserResponse,
 )
 from app.utils.postgres import ApiKeyDb, PresetDb, UsageRecordDb, UserDb, get_db
+from app.utils.thinking import thinking_levels
 
 # Get the logger
 logger = get_logger()
@@ -67,8 +69,20 @@ def _build_user(db: Session, user: UserDb) -> User:
         usage.spend_usage(db, user_id=user.id),
         usage.spend_usage(db, user_id=user.id, month_to_date=True),
         usage.month_reset_at(),
-        quota_attribution.user_shares(db, [user.id])[str(user.id)],
+        *_user_quota(db, [user.id])[str(user.id)],
     )
+
+
+def _user_quota(db: Session, user_ids) -> dict:
+    summed, by_account = quota_attribution.report(db, "users", user_ids)
+    return {
+        str(user_id): (limits_report.quota_usage(summed[str(user_id)]), limits_report.account_usage(by_account[str(user_id)])) for user_id in user_ids
+    }
+
+
+def _keys_with_usage(db: Session, keys: list[ApiKeyDb]) -> list[ApiKey]:
+    summed, by_account = quota_attribution.report(db, "keys", [key.id for key in keys])
+    return [ApiKey.from_db(key, limits_report.quota_usage(summed[str(key.id)]), limits_report.account_usage(by_account[str(key.id)])) for key in keys]
 
 
 def _build_users(db: Session, users: list[UserDb]) -> list[User]:
@@ -93,7 +107,7 @@ def _build_users(db: Session, users: list[UserDb]) -> list[User]:
     usage_by_user = {user_id: (int(tokens), int(requests), int(monthly_tokens)) for user_id, tokens, requests, monthly_tokens in usage_rows}
     spend_by_user = usage.spend_usage_rollups(db, UsageRecordDb.user_id, user_ids)
     reset_at = usage.month_reset_at()
-    quota_by_user = quota_attribution.user_shares(db, user_ids)
+    quota_by_user = _user_quota(db, user_ids)
     result = []
     for user in users:
         tokens, requests, monthly_tokens = usage_by_user.get(user.id, (0, 0, 0))
@@ -108,7 +122,7 @@ def _build_users(db: Session, users: list[UserDb]) -> list[User]:
                 total_spend,
                 monthly_spend,
                 reset_at,
-                quota_by_user[str(user.id)],
+                *quota_by_user[str(user.id)],
             )
         )
     return result
@@ -121,7 +135,7 @@ def _known_model_options(db: Session) -> list[str]:
 
 @router.get("/model-options")
 def list_model_options(_: str = Depends(security.require_admin), db: Session = Depends(get_db)):
-    return {"models": _known_model_options(db)}
+    return {"models": _known_model_options(db), "thinking_levels": list(thinking_levels())}
 
 
 @router.get(
@@ -194,10 +208,8 @@ def create_user(
         rate_limit_per_minute=request.rate_limit_per_minute,
         rate_limit_per_hour=request.rate_limit_per_hour,
         rate_limit_per_day=request.rate_limit_per_day,
-        monthly_token_budget=request.monthly_token_budget,
-        lifetime_token_budget=request.lifetime_token_budget,
-        monthly_spend_budget_usd=request.monthly_spend_budget_usd,
-        lifetime_spend_budget_usd=request.lifetime_spend_budget_usd,
+        five_hour_limit_budget=request.five_hour_limit_budget or None,
+        weekly_limit_budget=request.weekly_limit_budget or None,
         model_overrides_json=request_policy.encode_model_overrides(request.model_overrides),
         allowed_thinking_levels=list(dict.fromkeys(request.allowed_thinking_levels)),
         allowed_models_json=json.dumps(request.allowed_models, separators=(",", ":")) if request.allowed_models is not None else None,
@@ -243,7 +255,7 @@ def update_user(
     _: str = Depends(security.require_admin),  # noqa: B008
     db: Session = Depends(get_db),  # noqa: B008
 ) -> UserResponse:
-    """Rename a user, toggle their active flag, or set their rate limit / monthly token budget (0 clears a limit).
+    """Rename a user, toggle their active flag, or set their rate limits / limit budgets (0 clears a limit).
 
     Deactivating a user disables all of their keys for the proxy.
     """
@@ -289,14 +301,10 @@ def update_user(
         user.rate_limit_per_hour = request.rate_limit_per_hour
     if request.rate_limit_per_day is not None:
         user.rate_limit_per_day = request.rate_limit_per_day
-    if request.monthly_token_budget is not None:
-        user.monthly_token_budget = request.monthly_token_budget
-    if request.lifetime_token_budget is not None:
-        user.lifetime_token_budget = request.lifetime_token_budget
-    if request.monthly_spend_budget_usd is not None:
-        user.monthly_spend_budget_usd = request.monthly_spend_budget_usd
-    if request.lifetime_spend_budget_usd is not None:
-        user.lifetime_spend_budget_usd = request.lifetime_spend_budget_usd
+    if request.five_hour_limit_budget is not None:
+        user.five_hour_limit_budget = request.five_hour_limit_budget or None
+    if request.weekly_limit_budget is not None:
+        user.weekly_limit_budget = request.weekly_limit_budget or None
     if request.model_overrides is not None:
         user.model_overrides_json = request_policy.encode_model_overrides(request.model_overrides)
         _track_policy_override(db, user, "model_overrides")
@@ -407,7 +415,7 @@ def list_keys(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
     keys = db.query(ApiKeyDb).filter(ApiKeyDb.user_id == user_id).order_by(ApiKeyDb.created_at.asc()).all()
-    return ListApiKeysResponse(keys=[ApiKey.from_db(k) for k in keys])
+    return ListApiKeysResponse(keys=_keys_with_usage(db, keys))
 
 
 @router.post(
@@ -439,7 +447,8 @@ def create_key(
         key_hash=security.hash_key(secret),
         active=True,
         rate_limit_per_minute=request.rate_limit_per_minute,
-        monthly_token_budget=request.monthly_token_budget,
+        five_hour_limit_budget=request.five_hour_limit_budget or None,
+        weekly_limit_budget=request.weekly_limit_budget or None,
         created_at=datetime.now(timezone.utc),
     )
     db.add(key)
@@ -476,13 +485,15 @@ def update_key(
         key.active = request.active
     if request.rate_limit_per_minute is not None:
         key.rate_limit_per_minute = request.rate_limit_per_minute
-    if request.monthly_token_budget is not None:
-        key.monthly_token_budget = request.monthly_token_budget
+    if request.five_hour_limit_budget is not None:
+        key.five_hour_limit_budget = request.five_hour_limit_budget or None
+    if request.weekly_limit_budget is not None:
+        key.weekly_limit_budget = request.weekly_limit_budget or None
 
     db.commit()
 
     logger.info(f"Updated API key '{key_id}'")
-    return ApiKeyResponse(api_key=ApiKey.from_db(key))
+    return ApiKeyResponse(api_key=_keys_with_usage(db, [key])[0])
 
 
 @router.delete(

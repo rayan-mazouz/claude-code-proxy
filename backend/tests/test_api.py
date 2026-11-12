@@ -3,9 +3,12 @@
 
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import respx
+
+from app.utils.postgres import AccountDb
 
 ANTHROPIC_MESSAGES = "https://api.anthropic.com/v1/messages"
 
@@ -712,21 +715,73 @@ def test_per_key_rate_limit(client, admin_headers, seed_account):
     assert second.status_code == 429
 
 
+def _credit_weekly_share(account_id, *, users=None, keys=None, reset_in=timedelta(days=2)):
+    """Record attributed weekly-window shares on an account as the quota refresher would."""
+    from app.utils.postgres.base import SessionFactory
+
+    now = datetime.now(timezone.utc)
+    tracking = {
+        "weekly": {
+            "reset_at": (now + reset_in).isoformat(),
+            "observed_at": now.isoformat(),
+            "last_used": sum((users or {}).values()),
+            "users": {str(k): v for k, v in (users or {}).items()},
+            "keys": {str(k): v for k, v in (keys or {}).items()},
+        }
+    }
+    with SessionFactory() as db:
+        account = db.get(AccountDb, account_id)
+        account.weekly_reset_at = now + reset_in
+        account.quota_attribution_json = json.dumps(tracking)
+        db.commit()
+
+
 @respx.mock
-def test_per_key_monthly_budget(client, admin_headers, seed_account):
-    seed_account("a1")
+def test_per_key_limit_budget(client, admin_headers, seed_account):
+    account_id = seed_account("a1")
     user_id = client.post("/api/v1/users", headers=admin_headers, json={"name": "grace"}).json()["user"]["id"]
-    key = client.post(f"/api/v1/users/{user_id}/keys", headers=admin_headers, json={"label": "k", "monthly_token_budget": 5}).json()["secret"]
+    capped = client.post(f"/api/v1/users/{user_id}/keys", headers=admin_headers, json={"label": "capped", "weekly_limit_budget": 0.5}).json()
+    other = client.post(f"/api/v1/users/{user_id}/keys", headers=admin_headers, json={"label": "other"}).json()
 
     respx.route(host="testserver").pass_through()
     respx.post(ANTHROPIC_MESSAGES).mock(
         return_value=httpx.Response(200, json={"model": "claude-haiku-4-5", "usage": {"input_tokens": 10, "output_tokens": 0}})
     )
 
-    first = client.post("/api/v1/messages", headers={"Authorization": f"Bearer {key}"}, json={"model": "claude-haiku-4-5"})
-    assert first.status_code == 200  # consumes 10 tokens (over the budget of 5)
-    second = client.post("/api/v1/messages", headers={"Authorization": f"Bearer {key}"}, json={"model": "claude-haiku-4-5"})
-    assert second.status_code == 403
+    def send(secret):
+        return client.post("/api/v1/messages", headers={"Authorization": f"Bearer {secret}"}, json={"model": "claude-haiku-4-5"})
+
+    _credit_weekly_share(account_id, users={user_id: 0.4}, keys={capped["api_key"]["id"]: 0.4})
+    assert send(capped["secret"]).status_code == 200
+
+    _credit_weekly_share(account_id, users={user_id: 0.6}, keys={capped["api_key"]["id"]: 0.6})
+    blocked = send(capped["secret"])
+    assert blocked.status_code == 429
+    assert "weekly limit budget" in blocked.text
+    assert 0 < int(blocked.headers["Retry-After"]) <= 2 * 86400
+    # The user has no budget of their own, so their other keys keep working.
+    assert send(other["secret"]).status_code == 200
+
+
+def test_key_limit_budget_is_reported(client, admin_headers, seed_account):
+    account_id = seed_account("a1")
+    user_id = client.post("/api/v1/users", headers=admin_headers, json={"name": "ivan"}).json()["user"]["id"]
+    key = client.post(f"/api/v1/users/{user_id}/keys", headers=admin_headers, json={"label": "k", "weekly_limit_budget": 0.5}).json()["api_key"]
+    _credit_weekly_share(account_id, users={user_id: 0.25}, keys={key["id"]: 0.25})
+
+    listed = client.get(f"/api/v1/users/{user_id}/keys", headers=admin_headers).json()["keys"][0]
+    assert listed["limit_budget"] == {"five_hour": None, "weekly": 0.5}
+    assert listed["quota_usage"]["weekly"]["used_pct"] == 0.25
+    assert [entry["account_label"] for entry in listed["quota_usage_by_account"]] == ["a1"]
+
+    user = client.get("/api/v1/users", headers=admin_headers).json()["users"][0]
+    assert user["quota_usage_by_account"][0]["weekly"]["used_pct"] == 0.25
+
+    report = client.get("/api/v1/stats/limits", headers=admin_headers).json()
+    assert report["accounts"][0]["label"] == "a1"
+    assert report["accounts"][0]["proxy_share"]["weekly"]["used_pct"] == 0.25
+    assert report["keys"][0]["budget"]["weekly"] == 0.5
+    assert report["users"][0]["usage"]["weekly"]["used_pct"] == 0.25
 
 
 def test_key_limits_crud(client, admin_headers):
@@ -734,19 +789,19 @@ def test_key_limits_crud(client, admin_headers):
     created = client.post(
         f"/api/v1/users/{user_id}/keys",
         headers=admin_headers,
-        json={"label": "k", "rate_limit_per_minute": 30, "monthly_token_budget": 1000},
+        json={"label": "k", "rate_limit_per_minute": 30, "five_hour_limit_budget": 0.2},
     ).json()["api_key"]
     assert created["rate_limit_per_minute"] == 30
-    assert created["monthly_token_budget"] == 1000
+    assert created["limit_budget"] == {"five_hour": 0.2, "weekly": None}
 
     client.put(
         f"/api/v1/users/{user_id}/keys/{created['id']}",
         headers=admin_headers,
-        json={"rate_limit_per_minute": 0, "monthly_token_budget": 2000},
+        json={"rate_limit_per_minute": 0, "five_hour_limit_budget": 0, "weekly_limit_budget": 1.5},
     )
     keys = client.get(f"/api/v1/users/{user_id}/keys", headers=admin_headers).json()["keys"]
     assert keys[0]["rate_limit_per_minute"] == 0
-    assert keys[0]["monthly_token_budget"] == 2000
+    assert keys[0]["limit_budget"] == {"five_hour": None, "weekly": 1.5}
 
 
 @respx.mock
@@ -770,9 +825,10 @@ def test_per_user_rate_limit_across_keys(client, admin_headers, seed_account):
 
 
 @respx.mock
-def test_per_user_monthly_budget_across_keys(client, admin_headers, seed_account):
-    seed_account("a1")
-    user_id = client.post("/api/v1/users", headers=admin_headers, json={"name": "mallory", "monthly_token_budget": 5}).json()["user"]["id"]
+def test_per_user_limit_budget_across_keys(client, admin_headers, seed_account):
+    first_account = seed_account("a1")
+    second_account = seed_account("a2")
+    user_id = client.post("/api/v1/users", headers=admin_headers, json={"name": "mallory", "weekly_limit_budget": 0.5}).json()["user"]["id"]
     key_a = client.post(f"/api/v1/users/{user_id}/keys", headers=admin_headers, json={"label": "a"}).json()["secret"]
     key_b = client.post(f"/api/v1/users/{user_id}/keys", headers=admin_headers, json={"label": "b"}).json()["secret"]
 
@@ -781,11 +837,22 @@ def test_per_user_monthly_budget_across_keys(client, admin_headers, seed_account
         return_value=httpx.Response(200, json={"model": "claude-haiku-4-5", "usage": {"input_tokens": 10, "output_tokens": 0}})
     )
 
-    first = client.post("/api/v1/messages", headers={"Authorization": f"Bearer {key_a}"}, json={"model": "claude-haiku-4-5"})
-    assert first.status_code == 200  # consumes 10 tokens (over the budget of 5)
-    # A DIFFERENT key of the same user is now blocked because the user's monthly budget is exhausted.
-    second = client.post("/api/v1/messages", headers={"Authorization": f"Bearer {key_b}"}, json={"model": "claude-haiku-4-5"})
-    assert second.status_code == 403
+    def send(secret):
+        return client.post("/api/v1/messages", headers={"Authorization": f"Bearer {secret}"}, json={"model": "claude-haiku-4-5"})
+
+    # 0.3 + 0.15 of two accounts' weekly windows: still under half of one account's limit.
+    _credit_weekly_share(first_account, users={user_id: 0.3})
+    _credit_weekly_share(second_account, users={user_id: 0.15})
+    assert send(key_a).status_code == 200
+
+    # Shares are summed across accounts, so 0.3 + 0.25 exhausts the budget for every key of the user.
+    _credit_weekly_share(second_account, users={user_id: 0.25})
+    assert send(key_a).status_code == 429
+    assert send(key_b).status_code == 429
+
+    # A reset window no longer counts against the budget.
+    _credit_weekly_share(second_account, users={user_id: 0.25}, reset_in=timedelta(seconds=-1))
+    assert send(key_b).status_code == 200
 
 
 def test_user_limits_crud(client, admin_headers):
@@ -797,25 +864,25 @@ def test_user_limits_crud(client, admin_headers):
             "rate_limit_per_minute": 30,
             "rate_limit_per_hour": 120,
             "rate_limit_per_day": 1000,
-            "monthly_token_budget": 1000,
+            "weekly_limit_budget": 0.75,
         },
     ).json()["user"]
     assert created["rate_limit_per_minute"] == 30
     assert created["rate_limit_per_hour"] == 120
     assert created["rate_limit_per_day"] == 1000
-    assert created["monthly_token_budget"] == 1000
+    assert created["limit_budget"] == {"five_hour": None, "weekly": 0.75}
 
     user_id = created["id"]
     client.put(
         f"/api/v1/users/{user_id}",
         headers=admin_headers,
-        json={"rate_limit_per_minute": 0, "rate_limit_per_hour": 0, "rate_limit_per_day": 0, "monthly_token_budget": 2000},
+        json={"rate_limit_per_minute": 0, "rate_limit_per_hour": 0, "rate_limit_per_day": 0, "five_hour_limit_budget": 0.1, "weekly_limit_budget": 0},
     )
     user = client.get("/api/v1/users", headers=admin_headers).json()["users"][0]
     assert user["rate_limit_per_minute"] == 0
     assert user["rate_limit_per_hour"] == 0
     assert user["rate_limit_per_day"] == 0
-    assert user["monthly_token_budget"] == 2000
+    assert user["limit_budget"] == {"five_hour": 0.1, "weekly": None}
 
 
 def test_user_can_override_preset_models_and_rewrites(client, admin_headers):
@@ -911,32 +978,28 @@ def test_user_extended_limits_and_model_overrides_crud(client, admin_headers):
         headers=admin_headers,
         json={
             "name": "policy-user",
-            "monthly_token_budget": 1000,
-            "lifetime_token_budget": 5000,
-            "monthly_spend_budget_usd": 12.5,
-            "lifetime_spend_budget_usd": 50,
+            "five_hour_limit_budget": 0.25,
+            "weekly_limit_budget": 2,
             "model_overrides": {" Claude-Opus-4-8 ": " CLAUDE-SONNET-4-6 "},
         },
     )
     assert created.status_code == 201
     user = created.json()["user"]
-    assert user["lifetime_token_budget"] == 5000
-    assert user["monthly_spend_budget_usd"] == 12.5
-    assert user["lifetime_spend_budget_usd"] == 50
+    assert user["limit_budget"] == {"five_hour": 0.25, "weekly": 2.0}
     assert user["model_overrides"] == {"claude-opus-4-8": "claude-sonnet-4-6"}
 
     cleared = client.put(
         f"/api/v1/users/{user['id']}",
         headers=admin_headers,
         json={
-            "lifetime_token_budget": 0,
-            "monthly_spend_budget_usd": 0,
-            "lifetime_spend_budget_usd": 0,
+            "five_hour_limit_budget": 0,
+            "weekly_limit_budget": 0,
             "model_overrides": {},
         },
     )
     assert cleared.status_code == 200
     assert cleared.json()["user"]["model_overrides"] == {}
+    assert cleared.json()["user"]["limit_budget"] == {"five_hour": None, "weekly": None}
     assert (
         client.post(
             "/api/v1/users",
@@ -1032,22 +1095,17 @@ def test_user_model_override_hides_effective_name_in_forwarded_error(client, adm
 
 
 @respx.mock
-def test_user_lifetime_and_spend_limits_and_rollups(client, admin_headers, seed_account):
+def test_user_and_account_spend_rollups(client, admin_headers, seed_account):
     account_id = seed_account("budget-account")
     respx.route(host="testserver").pass_through()
     upstream = respx.post(ANTHROPIC_MESSAGES).mock(
         return_value=httpx.Response(200, json={"model": "claude-haiku-4-5", "usage": {"input_tokens": 10, "output_tokens": 0}})
     )
-    for name, limits in (
-        ("token-budget", {"lifetime_token_budget": 5}),
-        ("monthly-spend", {"monthly_spend_budget_usd": 0.000001}),
-        ("lifetime-spend", {"lifetime_spend_budget_usd": 0.000001}),
-    ):
-        created = client.post("/api/v1/users", headers=admin_headers, json={"name": name, **limits}).json()["user"]
+    for name in ("first", "second", "third"):
+        created = client.post("/api/v1/users", headers=admin_headers, json={"name": name}).json()["user"]
         key = client.post(f"/api/v1/users/{created['id']}/keys", headers=admin_headers, json={"label": "test-key"}).json()["secret"]
         auth = {"Authorization": f"Bearer {key}"}
         assert client.post("/api/v1/messages", headers=auth, json={"model": "claude-haiku-4-5"}).status_code == 200
-        assert client.post("/api/v1/messages", headers=auth, json={"model": "claude-haiku-4-5"}).status_code == 403
     assert upstream.call_count == 3
 
     users = client.get("/api/v1/users", headers=admin_headers).json()["users"]

@@ -253,6 +253,53 @@ export default function EventsPage() {
                 state.query === query ? state : { query, expanded: new Set<string>(), details: {} };
             return { query, ...update(base) };
         });
+    // Page through even unusually long retry histories without truncation.
+    const fetchLifecycle = async (requestId: string): Promise<ProxyEvent[]> => {
+        const details: ProxyEvent[] = [];
+        let nextOffset = 0;
+        while (true) {
+            const page = await api.events(
+                500,
+                nextOffset,
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                requestId,
+            );
+            details.push(...page.events);
+            nextOffset += page.events.length;
+            if (nextOffset >= page.total || !page.events.length) break;
+        }
+        return details;
+    };
+    // The summary's event count when each expanded lifecycle was last fetched, so a refresh that reports more
+    // events (a request still streaming or retrying) reloads it once instead of showing a frozen list.
+    const fetchedCounts = useRef(new Map<string, number>());
+    useEffect(() => {
+        const generation = queryString;
+        for (const { request_id: requestId, event_count: eventCount } of groups.flatMap(
+            (group) => group.requests,
+        )) {
+            const key = `${generation}\n${requestId}`;
+            if (!expandedRequests.has(requestId) || pendingDetails.current.has(key)) continue;
+            if ((fetchedCounts.current.get(key) ?? eventCount) === eventCount) continue;
+            pendingDetails.current.add(key);
+            fetchLifecycle(requestId)
+                .then((lifecycle) => {
+                    // Recorded only on success, so a failed refresh is retried on the next summary.
+                    fetchedCounts.current.set(key, eventCount);
+                    if (latestQuery.current !== generation) return;
+                    updateExpansion(generation, ({ expanded, details }) => ({
+                        expanded,
+                        details: { ...details, [requestId]: lifecycle },
+                    }));
+                })
+                .catch(() => undefined)
+                .finally(() => pendingDetails.current.delete(key));
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- re-run only when a refresh delivers new summaries
+    }, [groups]);
     const toggleRequest = async (requestId: string) => {
         const generation = queryString;
         if (expandedRequests.has(requestId)) {
@@ -263,32 +310,22 @@ export default function EventsPage() {
             });
             return;
         }
-        if (pendingDetails.current.has(`${generation}\n${requestId}`)) return;
+        const pendingKey = `${generation}\n${requestId}`;
+        if (pendingDetails.current.has(pendingKey)) return;
+        const summaryCount = groups
+            .flatMap((group) => group.requests)
+            .find((entry) => entry.request_id === requestId)?.event_count;
         let loaded = requestDetails[requestId];
-        if (!loaded) {
-            const pendingKey = `${generation}\n${requestId}`;
+        // A cached lifecycle older than the latest summary is fetched again.
+        if (
+            !loaded ||
+            (summaryCount !== undefined && fetchedCounts.current.get(pendingKey) !== summaryCount)
+        ) {
             pendingDetails.current.add(pendingKey);
-            pendingDetails.current.add(requestId);
             try {
-                // Page through even unusually long retry histories without truncation.
-                const details: ProxyEvent[] = [];
-                let nextOffset = 0;
-                while (true) {
-                    const page = await api.events(
-                        500,
-                        nextOffset,
-                        undefined,
-                        undefined,
-                        undefined,
-                        undefined,
-                        requestId,
-                    );
-                    details.push(...page.events);
-                    nextOffset += page.events.length;
-                    if (nextOffset >= page.total || !page.events.length) break;
-                }
+                if (summaryCount !== undefined) fetchedCounts.current.set(pendingKey, summaryCount);
+                loaded = await fetchLifecycle(requestId);
                 setDetailError(null);
-                loaded = details;
             } catch (e) {
                 setDetailError(e instanceof Error ? e.message : "Unable to load request events.");
                 return;
