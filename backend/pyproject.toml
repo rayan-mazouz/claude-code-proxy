@@ -5,27 +5,27 @@ description = "Centralized team proxy for Claude Code: rotates a pool of subscri
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.143.0",
+    "fastapi>=0.162.5",
     "uvicorn[standard]>=0.54.0",
-    "gunicorn>=26.2.0",
-    "sqlalchemy>=2.1.4",
+    "gunicorn>=27.0.0",
+    "sqlalchemy>=2.1.8",
     "sqlalchemy-utils>=0.43.0",
-    "pydantic>=2.14.1",
-    "pydantic-settings>=2.15.0",
+    "pydantic>=2.14.3",
+    "pydantic-settings>=2.16.2",
     "python-dotenv>=1.2.4",
     "pyjwt>=2.15.1",
-    "alembic>=1.20.0",
+    "alembic>=1.20.1",
     "cryptography>=50.0.2",
     "httpx>=0.28.1",
-    "boto3>=1.43.112",
+    "boto3>=1.44.1",
     "uvicorn-worker>=0.4.0",
-    "psycopg[binary]>=3.2",
+    "psycopg[binary]>=3.3.8",
 ]
 
 [dependency-groups]
 dev = [
-    "ruff>=0.17.0",
-    "pytest>=9.1.1",
+    "ruff>=0.17.4",
+    "pytest>=9.2.0",
     "respx>=0.23.1",
     "testcontainers[postgres]>=4.15.0",
 ]

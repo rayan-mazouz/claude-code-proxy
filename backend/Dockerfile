@@ -1,7 +1,7 @@
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 # A pinned uv binary keeps image builds reproducible.
-COPY --from=ghcr.io/astral-sh/uv:0.12.14 /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /uvx /usr/local/bin/
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

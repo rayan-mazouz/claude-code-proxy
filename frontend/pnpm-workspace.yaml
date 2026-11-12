@@ -1,8 +1,8 @@
 packages: []
 
 # Native packages allowed to run their install/build scripts.
-# `allowBuilds` is read by pnpm >=10; `onlyBuiltDependencies` by pnpm 9
-# (the version pinned in the Docker build). Keep both in sync.
+# `allowBuilds` is read by pnpm >=10 (the Docker build pins pnpm 12);
+# `onlyBuiltDependencies` by older releases. Keep both in sync.
 allowBuilds:
     "@tailwindcss/oxide": true
     sharp: true

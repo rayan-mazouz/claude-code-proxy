@@ -1,6 +1,6 @@
-# Node 24 is the active LTS line; odd-numbered releases are short-lived.
-FROM node:24-alpine AS base
-ARG PNPM_VERSION=10.34.7
+# Node 26 is the active LTS line; odd-numbered releases are short-lived.
+FROM node:26-alpine AS base
+ARG PNPM_VERSION=12.19.0
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm install -g "pnpm@${PNPM_VERSION}"
 WORKDIR /app
@@ -16,7 +16,7 @@ COPY . .
 # (dashboard at /, backend at /api), so the client calls the relative /api path.
 RUN pnpm run build
 
-FROM node:24-alpine AS runner
+FROM node:26-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
