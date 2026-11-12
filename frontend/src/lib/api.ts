@@ -229,9 +229,15 @@ export const api = {
         if (userId) params.set("user_id", userId);
         if (start) params.set("start", start);
         if (end) params.set("end", end);
-        if (requestId) params.set("request_id", requestId);
+        if (requestId) {
+            params.set("request_id", requestId);
+            params.set("chronological", "true");
+        }
         if (model) params.set("model", model);
-        if (groupBy) params.set("group_by", groupBy);
+        if (groupBy) {
+            params.set("group_by", groupBy);
+            params.set("summaries", "true");
+        }
         return request<ProxyEventPage>(`/v1/events?${params.toString()}`);
     },
 

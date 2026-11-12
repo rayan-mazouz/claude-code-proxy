@@ -1264,7 +1264,7 @@ def test_overview_aggregates_active_pool_capacity(client, admin_headers, seed_ac
     assert overview["pool_used_pct"] == 0.5125
     assert overview["pool_remaining_pct"] == 0.4875
     assert datetime.fromisoformat(overview["five_hour_reset_at"].replace("Z", "+00:00")) == now + timedelta(hours=1)
-    assert datetime.fromisoformat(overview["weekly_reset_at"].replace("Z", "+00:00")) == now + timedelta(hours=2)
+    assert datetime.fromisoformat(overview["weekly_reset_at"].replace("Z", "+00:00")) == now + timedelta(hours=4)
 
 
 def test_overview_counts_weekly_exhaustion_as_full_five_hour_usage(client, admin_headers, seed_account):

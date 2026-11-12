@@ -21,10 +21,9 @@ const ACCOUNT_EVENTS = new Set([
     "account_authentication_expired",
     "account_quota_threshold",
     "account_hard_limit",
-    "pool_unavailable",
 ]);
 const SYSTEM_EVENTS = new Set(["notifier_installed"]);
-const HEALTH_EVENTS = new Set(["elevated_503"]);
+const HEALTH_EVENTS = new Set(["request_capacity_exhausted"]);
 const REPORT_EVENTS = new Set([
     "daily_usage_report",
     "weekly_usage_report",

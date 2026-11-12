@@ -2,17 +2,18 @@
 # Description: Account rotation engine -- token freshness, quota tracking, quota-aware selection, and 429 cooldowns.
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Mapping, Optional, Set
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from app import config
 from app.utils import crypto, oauth, provider_health, spare_capacity
 from app.utils.models.api import AccountStatus, ProviderHealth
-from app.utils.postgres import AccountDb, UserDb
+from app.utils.postgres import AccountDb, ProxyEventDb, UserDb
 
 # Unified-status values that mean "this account is hard-limited right now".
 HARD_LIMIT_STATUSES = {"rate_limited", "blocked", "queueing_hard", "payment_required", "rejected"}
@@ -342,6 +343,79 @@ def apply_rate_limit_body(account: AccountDb, body: bytes) -> tuple[Optional[str
     return reached_type, reset_at
 
 
+def recover_confirmed_quota_cooldown(account: AccountDb, usage: Mapping) -> bool:
+    """Retire only the quota cooldown proven obsolete by a fresh provider probe.
+
+    Match the saved deadline to the recorded quota failure. Generic backoffs,
+    recent short 429s, partial probes and genuinely exhausted accounts stay parked.
+    """
+    if account.status != AccountStatus.COOLDOWN or account.cooldown_until is None:
+        return False
+    if account.provider_health == ProviderHealth.REAUTH_REQUIRED or usage.get("limit_reached") is True:
+        return False
+    for key in ("five_hour", "seven_day"):
+        bucket = usage.get(key)
+        if not isinstance(bucket, Mapping) or not isinstance(bucket.get("utilization"), (int, float)) or not 0 <= bucket["utilization"] <= 1:
+            return False
+    if any(window.used_pct is not None and window.used_pct >= window.threshold for window in quota_windows(account)):
+        return False
+    db = object_session(account)
+    if db is None:
+        return False
+    event = (
+        db.query(ProxyEventDb)
+        .filter(
+            ProxyEventDb.account_id == account.id,
+            ProxyEventDb.event_type.in_(["account.rate_limited", "account.cooldown", "account.transient_error"]),
+        )
+        .order_by(ProxyEventDb.created_at.desc(), ProxyEventDb.id.desc())
+        .first()
+    )
+    if event is None or event.event_type != "account.rate_limited":
+        return False
+    try:
+        metadata = json.loads(event.metadata_json or "{}")
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(metadata, Mapping) or metadata.get("failure_class") != "account_quota":
+        return False
+    match = re.fullmatch(r"Cooling down for (\d+)s", event.message or "")
+    if not match or int(match[1]) <= max(60, account.cooldown_seconds):
+        return False
+    created_at = event.created_at
+    deadline = account.cooldown_until
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    # Do not contradict a just-issued provider rejection with a potentially
+    # stale usage endpoint response.
+    if created_at > datetime.now(timezone.utc) - timedelta(seconds=60):
+        return False
+    expected = created_at + timedelta(seconds=int(match[1]))
+    if abs((expected - deadline).total_seconds()) > 5:
+        return False
+    # The probe ran outside a row lock. Verify that nobody disabled the
+    # account or changed its cooldown while the provider request was in flight.
+    persisted = (
+        db.query(AccountDb.status, AccountDb.cooldown_until, AccountDb.provider_health)
+        .filter(AccountDb.id == account.id)
+        .with_for_update()
+        .one_or_none()
+    )
+    if persisted is None or persisted.status != AccountStatus.COOLDOWN or persisted.provider_health == ProviderHealth.REAUTH_REQUIRED:
+        return False
+    persisted_deadline = persisted.cooldown_until
+    if persisted_deadline is not None and persisted_deadline.tzinfo is None:
+        persisted_deadline = persisted_deadline.replace(tzinfo=timezone.utc)
+    if persisted_deadline != deadline:
+        return False
+    account.cooldown_until = None
+    account.status = AccountStatus.ACTIVE
+    account.updated_at = datetime.now(timezone.utc)
+    return True
+
+
 def apply_usage_probe(account: AccountDb, usage: Mapping[str, Optional[dict]]) -> None:
     """Update quota fields from a zero-spend usage probe (see oauth.fetch_usage)."""
     five_hour = usage.get("five_hour")
@@ -373,6 +447,8 @@ def apply_usage_probe(account: AccountDb, usage: Mapping[str, Optional[dict]]) -
             account.monthly_used_pct = monthly["utilization"]
         if monthly.get("reset_at") is not None:
             account.monthly_reset_at = monthly["reset_at"]
+
+    recover_confirmed_quota_cooldown(account, usage)
 
 
 def parse_retry_after(headers: Mapping[str, str], default_seconds: int) -> int:

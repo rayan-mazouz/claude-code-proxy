@@ -352,7 +352,7 @@ def test_exhausted_503_alerts_for_one_user_and_respects_cooldown(client, admin_h
     make_user("single-503")
 
     with SessionFactory() as db:
-        rule = db.query(NotificationRuleDb).filter(NotificationRuleDb.event_type == "elevated_503").one()
+        rule = db.query(NotificationRuleDb).filter(NotificationRuleDb.event_type == "request_capacity_exhausted").one()
         rule.enabled = True
         user = db.query(UserDb).filter(UserDb.name == "single-503").one()
         db.add(
@@ -367,12 +367,12 @@ def test_exhausted_503_alerts_for_one_user_and_respects_cooldown(client, admin_h
             )
         )
         db.flush()
-        assert notifications.enqueue_elevated_503(db) == 1
-        assert notifications.enqueue_elevated_503(db) == 0
+        assert notifications.enqueue_capacity_exhausted(db) == 1
+        assert notifications.enqueue_capacity_exhausted(db) == 0
         db.commit()
 
     with SessionFactory() as db:
-        delivery = db.query(NotificationDeliveryDb).filter(NotificationDeliveryDb.event_type == "elevated_503").one()
+        delivery = db.query(NotificationDeliveryDb).filter(NotificationDeliveryDb.event_type == "request_capacity_exhausted").one()
         assert "HTTP 503" in delivery.message
         assert "Affected users: 1" in delivery.message
 

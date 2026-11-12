@@ -147,6 +147,7 @@ class OverviewResponse(BaseModel):
     total_accounts: int
     active_accounts: int
     usable_accounts: int
+    total_reset_credits_available: Optional[int] = None
     five_hour_average_pct: float
     weekly_average_pct: float
     monthly_average_pct: float

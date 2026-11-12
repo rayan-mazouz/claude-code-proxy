@@ -12,7 +12,14 @@ import {
 } from "recharts";
 import { ActivityResponse } from "@/lib/types";
 import { formatCompactNumber } from "@/lib/format";
-import { groupRequestUsers, OTHERS_ID } from "@/lib/requestAnalytics";
+import {
+    groupRequestUsers,
+    OTHERS_ID,
+    REQUEST_CHART_X_KEY,
+    requestSeriesKey,
+    requestChartRow,
+    requestTooltipEntries,
+} from "@/lib/requestAnalytics";
 import { STACK_COLORS } from "@/components/Charts";
 
 type View = "tps" | "models" | "users";
@@ -84,9 +91,9 @@ export function RequestAnalyticsCard({ activity }: { activity: ActivityResponse 
             .sort((a, b) =>
                 view === "users" ? (totals.get(b) ?? 0) - (totals.get(a) ?? 0) : a.localeCompare(b),
             )
-            .map((key, i) => ({
+            .map((key) => ({
                 id: key,
-                key: `series${i}`,
+                key: requestSeriesKey(view, key),
                 label:
                     view === "users"
                         ? key === OTHERS_ID
@@ -110,9 +117,7 @@ export function RequestAnalyticsCard({ activity }: { activity: ActivityResponse 
                   : point.requests_by_model;
         return {
             ...dates(point.ts, hourly),
-            ...Object.fromEntries(
-                series.map((s) => [s.key, values?.[s.id] ?? (view === "tps" ? null : 0)]),
-            ),
+            ...requestChartRow(point.ts, values, series, view === "tps" ? null : 0),
         };
     });
     return (
@@ -208,6 +213,7 @@ export function RequestAnalyticsCard({ activity }: { activity: ActivityResponse 
                         <div className="h-[280px] w-full sm:h-[320px]">
                             <ResponsiveContainer width="100%" height="100%">
                                 <LineChart
+                                    key={view}
                                     data={data}
                                     margin={{ top: 8, right: 12, left: 0, bottom: 8 }}
                                     accessibilityLayer
@@ -218,7 +224,8 @@ export function RequestAnalyticsCard({ activity }: { activity: ActivityResponse 
                                         vertical={false}
                                     />
                                     <XAxis
-                                        dataKey="axis"
+                                        dataKey={REQUEST_CHART_X_KEY}
+                                        tickFormatter={(value) => dates(String(value), hourly).axis}
                                         stroke={AXIS}
                                         tickLine={false}
                                         axisLine={false}
@@ -241,23 +248,30 @@ export function RequestAnalyticsCard({ activity }: { activity: ActivityResponse 
                                     <Tooltip
                                         content={({ active, payload }) => {
                                             if (!active || !payload?.length) return null;
-                                            const entries = payload.filter((p) => p.value != null);
+                                            const row = payload[0]?.payload;
+                                            if (!row) return null;
+                                            const entries = requestTooltipEntries(
+                                                row,
+                                                series,
+                                                effectiveHidden,
+                                                view,
+                                            );
                                             if (!entries.length) return null;
                                             return (
                                                 <div className="border-ink-600 bg-ink-950 text-fog-200 max-w-[calc(100vw-5rem)] rounded-xl border p-3 text-xs shadow-xl sm:max-w-[270px]">
                                                     <p className="text-fog-400 mb-2">
-                                                        {String(payload[0]?.payload.label ?? "")}
+                                                        {String(row.label ?? "")}
                                                     </p>
                                                     {entries.map((p) => (
                                                         <div
-                                                            key={String(p.dataKey)}
+                                                            key={p.key}
                                                             className="flex justify-between gap-4 py-1"
                                                         >
                                                             <span
                                                                 className="truncate"
                                                                 style={{ color: p.color }}
                                                             >
-                                                                {p.name}
+                                                                {p.label}
                                                             </span>
                                                             <span className="shrink-0 font-mono tabular-nums">
                                                                 {view === "tps"

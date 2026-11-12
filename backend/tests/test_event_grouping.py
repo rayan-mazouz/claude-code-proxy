@@ -86,3 +86,45 @@ def test_legacy_http_success_does_not_require_retained_usage(client, admin_heade
     row = client.get("/api/v1/events?request_id=req_deleted_success", headers=admin_headers).json()["events"][0]
     assert row["metadata"]["user_name"] == "Deleted user"
     assert row["metadata"]["request_outcome"] == "succeeded"
+
+
+def test_server_summaries_nest_requests_without_transferring_history(client, admin_headers):
+    now = datetime.now(timezone.utc)
+    with SessionFactory() as db:
+        for index in range(4):
+            for step in range(30):
+                context = {
+                    "model": "test-model",
+                    "codex_root_turn_id": f"turn-{index // 2}",
+                    "codex_thread_id": "thread",
+                    "codex_session_id": "session",
+                }
+                values = dict(
+                    id=uuid.uuid4(),
+                    request_id=f"req_{index}",
+                    event_type="account.attempt",
+                    created_at=now + timedelta(seconds=index * 100 + step),
+                    metadata_json=json.dumps(context, separators=(",", ":")),
+                )
+                db.add(ProxyEventDb(**values))
+        unrelated = {**values, "id": uuid.uuid4(), "request_id": "req_unrelated", "metadata_json": json.dumps({**context, "model": "other-model"})}
+        db.add(ProxyEventDb(**unrelated))
+        db.commit()
+    params = {"group_by": "agent_run", "summaries": True, "limit": 1, "model": "test-model"}
+    response = client.get("/api/v1/events", params=params, headers=admin_headers)
+    assert response.status_code == 200
+    page = response.json()
+    assert page["total"] == 2
+    assert len(page["events"]) == 2  # 60 lifecycle rows stay on the server
+    assert page["groups"][0]["key"] == "turn-1"
+    assert [r["request_id"] for r in page["groups"][0]["requests"]] == ["req_3", "req_2"]
+    assert all(r["event_count"] == 30 for r in page["groups"][0]["requests"])
+    next_page = client.get("/api/v1/events", params={**params, "offset": 1}, headers=admin_headers).json()
+    assert next_page["groups"][0]["key"] == "turn-0"
+    for group_by in ("conversation", "session", "request"):
+        result = client.get("/api/v1/events", params={**params, "group_by": group_by}, headers=admin_headers).json()
+        assert result["total"] == (4 if group_by == "request" else 1)
+    details = client.get("/api/v1/events", params={"request_id": "req_3", "chronological": True}, headers=admin_headers).json()
+    assert len(details["events"]) == 30
+    assert [e["created_at"] for e in details["events"]] == sorted(e["created_at"] for e in details["events"])
+    assert client.get("/api/v1/events", params={**params, "model": "absent"}, headers=admin_headers).json()["groups"] == []

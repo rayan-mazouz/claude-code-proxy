@@ -169,14 +169,35 @@ def overview(
         return round(sum(values) / len(values) * 100.0, 2) if values else 0.0
 
     def earliest_reset_at(field: str) -> datetime | None:
-        resets: list[datetime] = []
+        """Only advertise resets that replenish quota the account can use.
+
+        A different exhausted window (or a cooldown) can keep an account
+        blocked after this reset. Include it only if those blockers expire by
+        the reset time, including simultaneous resets.
+        """
+        key = {"five_hour_reset_at": "five_hour", "session_reset_at": "five_hour", "weekly_reset_at": "weekly", "monthly_reset_at": "monthly"}[field]
+
+        def utc(value: datetime | None) -> datetime | None:
+            return value.replace(tzinfo=timezone.utc) if value is not None and value.tzinfo is None else value
+
+        resets = []
         for account in active_accounts:
-            reset_at = getattr(account, field)
-            if reset_at is None:
+            windows = rotation.quota_windows(account)
+            target = next(window for window in windows if window.key == key)
+            reset_at = utc(target.reset_at)
+            if reset_at is None or reset_at <= now or not target.used_pct or target.used_pct <= 0:
                 continue
-            if reset_at.tzinfo is None:
-                reset_at = reset_at.replace(tzinfo=timezone.utc)
-            if reset_at > now:
+            cooldown = utc(account.cooldown_until)
+            if cooldown is not None and cooldown > reset_at:
+                continue
+            blocked = any(
+                window.key != key
+                and window.used_pct is not None
+                and window.used_pct >= window.threshold
+                and (utc(window.reset_at) is None or utc(window.reset_at) > reset_at)
+                for window in windows
+            )
+            if not blocked:
                 resets.append(reset_at)
         return min(resets, default=None)
 
@@ -726,7 +747,6 @@ def dashboard_analytics(
         "activity": activity,
         "hourly": hourly,
         "lookups": analytics_lookups,
-        "distributions": distributions,
         "model_mix": model_mix,
         "thinking_level_mix": thinking_level_mix,
     }

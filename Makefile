@@ -16,6 +16,7 @@ backend-check:
 	cd backend && uv run pytest -q
 
 frontend-check:
+	cd frontend && node --test tests/*.test.mjs
 	cd frontend && pnpm lint
 	cd frontend && pnpm exec prettier --check "src/app/(dashboard)/accounts/page.tsx" "src/app/(dashboard)/fallbacks/page.tsx" "src/app/(dashboard)/notifications/page.tsx" "src/app/(dashboard)/users/page.tsx" src/components/Sidebar.tsx src/lib/api.ts src/lib/types.ts
 	cd frontend && pnpm build

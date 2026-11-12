@@ -30,7 +30,6 @@ _STATUS_COMMAND = re.compile(
     re.IGNORECASE,
 )
 _TELEGRAM_MESSAGE_LIMIT = 4096
-ELEVATED_503_WINDOW_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -140,20 +139,11 @@ _ACCOUNT_HARD_LIMIT_TEMPLATE = (
     "Weekly threshold: {{ weekly_rotation_threshold }}%\n"
     "Traffic is moving to the next available account."
 )
-_ELEVATED_503_TEMPLATE_V1 = (
-    "🚨 Elevated 503 errors detected\n\n"
-    "Multiple users are experiencing unavailable proxy capacity.\n"
-    "503 responses: {{ error_count }}\n"
-    "Affected users: {{ affected_user_count }}\n"
-    "Window: {{ window_seconds }} seconds\n"
-    "Users: {{ affected_users }}\n"
-    "Detected: {{ event_time }}"
-)
+
 LEGACY_DEFAULT_TEMPLATES: dict[str, tuple[str, ...]] = {
     "account_added": (_ACCOUNT_ADDED_TEMPLATE_V1, _ACCOUNT_ADDED_TEMPLATE_V2),
     "account_quota_threshold": (_ACCOUNT_QUOTA_THRESHOLD_TEMPLATE_V1, _ACCOUNT_QUOTA_THRESHOLD_TEMPLATE_V2),
     "account_hard_limit": (_ACCOUNT_HARD_LIMIT_TEMPLATE_V1, _ACCOUNT_HARD_LIMIT_TEMPLATE_V2),
-    "elevated_503": (_ELEVATED_503_TEMPLATE_V1,),
 }
 
 EVENTS: dict[str, EventDefinition] = {
@@ -223,39 +213,35 @@ EVENTS: dict[str, EventDefinition] = {
         cooldown_seconds=0,
         variables=ACCOUNT_VARIABLES,
     ),
-    "pool_unavailable": EventDefinition(
-        title="Entire account pool unavailable",
+    "request_capacity_exhausted": EventDefinition(
+        title="Request capacity exhausted",
         description=(
-            "Sent when an incoming request exhausts or skips every account and the proxy is about to return 503. "
-            "It repeats only after the configured cooldown and only when another request arrives."
+            "A request exhausted all eligible accounts and permitted fallbacks and returned HTTP 503. "
+            "One shared cooldown covers all capacity failures, including model-specific unavailability."
         ),
         default_template=(
-            "🛑 Claude account pool unavailable\n\nNo pooled account can currently serve requests.\n"
-            "Total accounts: {{ total_accounts }}\nUsable accounts: {{ usable_accounts }}\n"
-            "Next known reset: {{ next_reset_at }}\nDetected: {{ event_time }}"
+            "🚨 Request capacity exhausted (HTTP 503)\n\n"
+            "Model: {{ model }}\nReason: {{ failure_reason }}\n"
+            "Usable accounts: {{ usable_accounts }} / {{ total_accounts }}\n"
+            "Next capacity reset: {{ next_reset_at }}\n"
+            "503 responses in the last {{ window_seconds }} seconds: {{ error_count }}\n"
+            "Affected users: {{ affected_user_count }}\nUsers: {{ affected_users }}\n"
+            "Detected: {{ event_time }}"
         ),
         default_enabled=True,
         cooldown_seconds=900,
-        variables=COMMON_VARIABLES + ("usable_accounts", "total_accounts", "next_reset_at"),
-    ),
-    "elevated_503": EventDefinition(
-        title="503 capacity exhaustion",
-        description=(
-            "Sent whenever an exhausted request returns HTTP 503, including a single affected user. "
-            "The configurable cooldown prevents duplicate Telegram alerts while failures continue."
+        variables=COMMON_VARIABLES
+        + (
+            "model",
+            "failure_reason",
+            "usable_accounts",
+            "total_accounts",
+            "next_reset_at",
+            "error_count",
+            "affected_user_count",
+            "window_seconds",
+            "affected_users",
         ),
-        default_template=(
-            "🚨 Proxy request exhausted (HTTP 503)\n\n"
-            "No subscription account or fallback could serve a request.\n"
-            "503 responses in the last {{ window_seconds }} seconds: {{ error_count }}\n"
-            "Affected users: {{ affected_user_count }}\n"
-            "Window: {{ window_seconds }} seconds\n"
-            "Users: {{ affected_users }}\n"
-            "Detected: {{ event_time }}"
-        ),
-        default_enabled=False,
-        cooldown_seconds=900,
-        variables=COMMON_VARIABLES + ("error_count", "affected_user_count", "window_seconds", "affected_users"),
     ),
     "user_rate_limit": EventDefinition(
         title="User request rate limit exceeded",
@@ -418,6 +404,9 @@ def render_template(event_type: str, template: str, context: Mapping[str, object
 
 
 def ensure_default_rules(db: Session, channel: NotificationChannelDb) -> list[NotificationRuleDb]:
+    from app.utils.notification_migrations import migrate_capacity_rules
+
+    migrate_capacity_rules(db, channel.id)
     existing = {rule.event_type: rule for rule in db.query(NotificationRuleDb).filter(NotificationRuleDb.channel_id == channel.id).all()}
     now = utcnow()
     for event_type, definition in EVENTS.items():
@@ -520,14 +509,22 @@ def enqueue_event(db: Session, event_type: str, context: Mapping[str, object], d
     )
     queued = 0
     for rule, channel in rules:
+        if event_type == "request_capacity_exhausted":
+            # Serialize the cooldown check across simultaneous exhausted requests.
+            rule = db.query(NotificationRuleDb).filter(NotificationRuleDb.id == rule.id).populate_existing().with_for_update().one()
+            if not rule.enabled:
+                continue
         event_key = dedupe_key
         if rule.cooldown_seconds > 0:
             recent = (
                 db.query(NotificationDeliveryDb)
                 .filter(
                     NotificationDeliveryDb.channel_id == channel.id,
-                    NotificationDeliveryDb.event_type == event_type,
-                    NotificationDeliveryDb.event_key.like(f"{dedupe_key}:%"),
+                    NotificationDeliveryDb.event_type.in_(("request_capacity_exhausted", "pool_unavailable", "elevated_503"))
+                    if event_type == "request_capacity_exhausted"
+                    else NotificationDeliveryDb.event_type == event_type,
+                    NotificationDeliveryDb.status != "suppressed" if event_type == "request_capacity_exhausted" else True,
+                    True if event_type == "request_capacity_exhausted" else NotificationDeliveryDb.event_key.like(f"{dedupe_key}:%"),
                     NotificationDeliveryDb.created_at >= now - timedelta(seconds=rule.cooldown_seconds),
                 )
                 .first()
@@ -648,51 +645,51 @@ def enqueue_account_hard_limit(db: Session, account: AccountDb, dashboard_url: s
     )
 
 
-def enqueue_pool_unavailable(db: Session, dashboard_url: str = "") -> int:
-    accounts = db.query(AccountDb).all()
-    resets = [value for account in accounts for value in (account.session_reset_at, account.weekly_reset_at) if value is not None]
-    total, usable = _pool_counts(db)
-    return enqueue_event(
-        db,
-        "pool_unavailable",
-        {
-            "event_time": _format_time(utcnow()),
-            "dashboard_url": dashboard_url,
-            "usable_accounts": usable,
-            "total_accounts": total,
-            "next_reset_at": _format_time(min(resets) if resets else None),
-        },
-        "pool",
-    )
-
-
-def enqueue_elevated_503(db: Session, dashboard_url: str = "") -> int:
-    """Queue an alert for every exhausted 503, subject to each rule's cooldown."""
+def enqueue_capacity_exhausted(db: Session, dashboard_url: str = "", *, model: str | None = None, request_id: str | None = None) -> int:
+    """One request-failure alert, one rolling window, and one cooldown per channel."""
     now = utcnow()
     recent = (
         db.query(ProxyEventDb)
         .filter(
             ProxyEventDb.event_type == "request.exhausted",
             ProxyEventDb.status_code == 503,
-            ProxyEventDb.created_at >= now - timedelta(seconds=ELEVATED_503_WINDOW_SECONDS),
+            ProxyEventDb.created_at >= now - timedelta(seconds=60),
         )
+        .order_by(ProxyEventDb.created_at.desc(), ProxyEventDb.id.desc())
         .all()
     )
     if not recent:
         return 0
+    accounts = db.query(AccountDb).all()
+    candidates = []
+    for account in accounts:
+        if account.status == AccountStatus.DISABLED or account.provider_health == ProviderHealth.REAUTH_REQUIRED:
+            continue
+        blocked = [w for w in rotation.quota_windows(account) if w.used_pct is not None and w.used_pct >= w.threshold]
+        if any(w.reset_at is None for w in blocked):
+            continue
+        deadlines = [w.reset_at for w in blocked]
+        if account.cooldown_until is not None:
+            deadlines.append(account.cooldown_until)
+        deadlines = [d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d for d in deadlines]
+        if deadlines and max(deadlines) > now:
+            candidates.append(max(deadlines))
     user_ids = {event.user_id for event in recent if event.user_id is not None}
     names = {user.name for user in db.query(UserDb).filter(UserDb.id.in_(user_ids)).all() if user.name}
     context = {
         "event_time": _format_time(now),
         "dashboard_url": dashboard_url,
+        "model": model or "Unknown",
+        "failure_reason": "No eligible subscription account or permitted API fallback could serve this request.",
+        "usable_accounts": sum(rotation.is_usable(a) for a in accounts),
+        "total_accounts": len(accounts),
+        "next_reset_at": _format_time(min(candidates, default=None)),
         "error_count": len(recent),
         "affected_user_count": len(user_ids),
-        "window_seconds": ELEVATED_503_WINDOW_SECONDS,
+        "window_seconds": 60,
         "affected_users": ", ".join(sorted(names)) or "Unknown users",
     }
-    # Keep the dedupe key stable so the configured cooldown spans rolling
-    # minute boundaries instead of resetting at every new minute bucket.
-    return enqueue_event(db, "elevated_503", context, "503")
+    return enqueue_event(db, "request_capacity_exhausted", context, f"capacity:{request_id or recent[0].request_id}")
 
 
 def enqueue_client_limit(

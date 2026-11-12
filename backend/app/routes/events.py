@@ -6,12 +6,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import desc, func, or_
+from sqlalchemy import JSON, cast, desc, func, or_
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.utils import security
 from app.utils.models.api import ProxyEvent, ProxyEventPage
+from app.utils.models.api.events import EventGroup, EventRequestSummary
 from app.utils.postgres import AccountDb, AnthropicFallbackDb, ProxyEventDb, UsageRecordDb, UserDb, get_db
 
 router = APIRouter(tags=["Events"], prefix="/events")
@@ -21,13 +22,15 @@ router = APIRouter(tags=["Events"], prefix="/events")
 def list_events(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    summaries: bool = False,
+    chronological: bool = False,
     event_type: Optional[str] = None,
     request_id: Optional[str] = None,
     user_id: Optional[uuid.UUID] = None,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
     model: Optional[str] = None,
-    group_by: Optional[Literal["request"]] = None,
+    group_by: Optional[Literal["request", "agent_run", "conversation", "session"]] = None,
     _: str = Depends(security.require_admin),
     db: Session = Depends(get_db),
 ) -> ProxyEventPage:  # noqa: B008
@@ -41,44 +44,68 @@ def list_events(
         query = query.filter(ProxyEventDb.user_id == user_id)
     if model:
         normalized_model = model.strip()
-        query = (
-            query.outerjoin(UsageRecordDb, UsageRecordDb.request_id == ProxyEventDb.request_id)
-            .filter(
-                or_(
-                    UsageRecordDb.model == normalized_model,
-                    ProxyEventDb.metadata_json.contains(f'"model": "{normalized_model}"'),
-                    ProxyEventDb.metadata_json.contains(f'"requested_model": "{normalized_model}"'),
-                )
+        metadata = cast(ProxyEventDb.metadata_json, JSON)
+        query = query.filter(
+            or_(
+                metadata["model"].as_string() == normalized_model,
+                metadata["requested_model"].as_string() == normalized_model,
+                ProxyEventDb.request_id.in_(db.query(UsageRecordDb.request_id).filter(UsageRecordDb.model == normalized_model)),
             )
-            .distinct()
         )
     if start:
         query = query.filter(ProxyEventDb.created_at >= start)
     if end:
         query = query.filter(ProxyEventDb.created_at < end)
-    if group_by == "request":
-        # Page whole requests, not lifecycle events. A request must appear on
-        # exactly one page even when it has many retries or sub-events.
-        requests = query.with_entities(
-            ProxyEventDb.request_id,
+    summary_info = {}
+    selected_keys = []
+    if group_by:
+        # Page complete top-level groups. The UI then nests their request IDs
+        # and lifecycle events, so changing the selector never flattens the
+        # hierarchy or splits one group across pages.
+        group_column = {
+            "request": ProxyEventDb.request_id,
+            "agent_run": cast(ProxyEventDb.metadata_json, JSON)["codex_root_turn_id"].as_string(),
+            "conversation": cast(ProxyEventDb.metadata_json, JSON)["codex_thread_id"].as_string(),
+            "session": cast(ProxyEventDb.metadata_json, JSON)["codex_session_id"].as_string(),
+        }[group_by]
+        group_key = func.coalesce(group_column, ProxyEventDb.request_id)
+        groups = query.with_entities(
+            group_key.label("group_key"),
             func.max(ProxyEventDb.created_at).label("latest_at"),
-            func.count().over().label("request_total"),
-        ).group_by(ProxyEventDb.request_id)
-        selected = requests.order_by(desc("latest_at"), desc(ProxyEventDb.request_id)).offset(offset).limit(limit).all()
-        # The window count rides along with the page; only a page past the end needs a separate count.
-        total = int(selected[0].request_total) if selected else requests.count()
-        selected_ids = [row.request_id for row in selected]
-        rows = (
-            db.query(ProxyEventDb)
-            .filter(ProxyEventDb.event_type != "request.reserved", ProxyEventDb.request_id.in_(selected_ids))
-            .order_by(desc(ProxyEventDb.created_at), desc(ProxyEventDb.id))
-            .all()
-            if selected_ids
-            else []
+            func.count().over().label("group_total"),
+        ).group_by(group_key)
+        selected = groups.order_by(desc("latest_at"), desc("group_key")).offset(offset).limit(limit).all()
+        total = int(selected[0].group_total) if selected else groups.count()
+        selected_keys = [row.group_key for row in selected]
+        grouped_rows = db.query(ProxyEventDb).filter(
+            ProxyEventDb.event_type != "request.reserved",
+            group_key.in_(selected_keys),
+            ProxyEventDb.request_id.in_(query.with_entities(ProxyEventDb.request_id).filter(group_key.in_(selected_keys))),
         )
+        if summaries and selected_keys:
+            # Rank and count in SQL: only one row per request crosses the wire.
+            ranked = grouped_rows.with_entities(
+                ProxyEventDb.id.label("event_id"),
+                group_key.label("top_key"),
+                func.count().over(partition_by=ProxyEventDb.request_id).label("event_count"),
+                func.row_number()
+                .over(
+                    partition_by=ProxyEventDb.request_id,
+                    order_by=(desc(ProxyEventDb.created_at), desc(ProxyEventDb.id)),
+                )
+                .label("rank"),
+            ).subquery()
+            selected_rows = db.query(ranked).filter(ranked.c.rank == 1).all()
+            summary_info = {row.event_id: (row.top_key, row.event_count) for row in selected_rows}
+            rows = (
+                db.query(ProxyEventDb).filter(ProxyEventDb.id.in_(summary_info)).order_by(desc(ProxyEventDb.created_at), desc(ProxyEventDb.id)).all()
+            )
+        else:
+            rows = grouped_rows.order_by(desc(ProxyEventDb.created_at), desc(ProxyEventDb.id)).all() if selected_keys else []
     else:
         total = query.count()
-        rows = query.order_by(desc(ProxyEventDb.created_at), desc(ProxyEventDb.id)).offset(offset).limit(limit).all()
+        ordering = (ProxyEventDb.created_at, ProxyEventDb.id) if chronological else (desc(ProxyEventDb.created_at), desc(ProxyEventDb.id))
+        rows = query.order_by(*ordering).offset(offset).limit(limit).all()
     request_ids = {row.request_id for row in rows}
     usage_rows = db.query(UsageRecordDb).filter(UsageRecordDb.request_id.in_(request_ids)).all() if request_ids else []
     usage_by_request = {row.request_id: row for row in usage_rows}
@@ -169,4 +196,11 @@ def list_events(
             metadata["account_name"] = fallback_names.get(row.fallback_provider_id, "Deleted fallback provider")
         hot_cutoff = datetime.now(timezone.utc) - timedelta(days=get_settings().ARCHIVE_HOT_RETENTION_DAYS)
         events.append(ProxyEvent.model_validate({**row.__dict__, "metadata": metadata, "archive_hot": row.created_at >= hot_cutoff}))
-    return ProxyEventPage(total=total, limit=limit, offset=offset, events=events)
+    groups = []
+    if summaries and group_by:
+        grouped = {key: [] for key in selected_keys}
+        for event in events:
+            key, count = summary_info[event.id]
+            grouped[key].append(EventRequestSummary(request_id=event.request_id, summary=event, event_count=count))
+        groups = [EventGroup(key=key, requests=grouped[key]) for key in selected_keys]
+    return ProxyEventPage(total=total, limit=limit, offset=offset, events=events, groups=groups)

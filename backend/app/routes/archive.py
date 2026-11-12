@@ -4,15 +4,43 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
+from sqlalchemy import desc, or_
 from sqlalchemy.orm import Session
 
 from app.utils import archive, security
-from app.utils.postgres import UsageRecordDb, get_db
+from app.utils.postgres import ApiKeyDb, UsageRecordDb, UserDb, get_db
 
 router = APIRouter(tags=["Request explorer"], prefix="/requests")
+
+
+class ArchiveRequest(BaseModel):
+    event_id: Optional[uuid.UUID]
+    request_id: Optional[str]
+    created_at: datetime
+    user_id: uuid.UUID
+    user_name: Optional[str]
+    api_key_id: Optional[uuid.UUID]
+    api_key_label: Optional[str]
+    model: str
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
+    status_code: Optional[int]
+    reasoning_level: Optional[str]
+    request_mode: Optional[str] = None
+    cost_usd: Optional[float]
+    archive_available: bool
+
+
+class ArchiveRequestPage(BaseModel):
+    items: List[ArchiveRequest]
+    total: int
+    limit: int
+    offset: int
 
 
 class ArchiveRequestDetail(BaseModel):
@@ -21,6 +49,18 @@ class ArchiveRequestDetail(BaseModel):
     response_body_path: str
     request_available: bool
     response_available: bool
+
+
+def _event_id(request_id: Optional[str]) -> Optional[uuid.UUID]:
+    if not request_id or not request_id.startswith("req_"):
+        return None
+    value = request_id[4:]
+    if len(value) != 32:
+        return None
+    try:
+        return uuid.UUID(hex=value)
+    except ValueError:
+        return None
 
 
 def _store() -> archive.S3ArchiveStore:
@@ -49,6 +89,79 @@ async def _body_key(
 def _created_at(db: Session, event_id: uuid.UUID) -> datetime:
     row = db.query(UsageRecordDb).filter(UsageRecordDb.request_id == f"req_{event_id.hex}").first()
     return row.created_at if row is not None else datetime.now(timezone.utc)
+
+
+@router.get("", response_model=ArchiveRequestPage)
+async def list_archive_requests(
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    search: Optional[str] = Query(None, max_length=200),
+    user_id: Optional[uuid.UUID] = None,
+    model: Optional[str] = Query(None, max_length=200),
+    status_code: Optional[int] = Query(None, ge=100, le=599),
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    _: str = Depends(security.require_admin),  # noqa: B008
+    db: Session = Depends(get_db),  # noqa: B008
+) -> ArchiveRequestPage:
+    query = (
+        db.query(UsageRecordDb, UserDb.name, ApiKeyDb.label)
+        .join(UserDb, UsageRecordDb.user_id == UserDb.id)
+        .outerjoin(ApiKeyDb, UsageRecordDb.api_key_id == ApiKeyDb.id)
+    )
+    if user_id:
+        query = query.filter(UsageRecordDb.user_id == user_id)
+    if model:
+        query = query.filter(UsageRecordDb.model.ilike(f"%{model}%"))
+    if status_code is not None:
+        query = query.filter(UsageRecordDb.status_code == status_code)
+    if start:
+        query = query.filter(UsageRecordDb.created_at >= start)
+    if end:
+        query = query.filter(UsageRecordDb.created_at < end)
+    if search:
+        term = f"%{search}%"
+        query = query.filter(
+            or_(
+                UsageRecordDb.request_id.ilike(term),
+                UsageRecordDb.model.ilike(term),
+                UserDb.name.ilike(term),
+                ApiKeyDb.label.ilike(term),
+            )
+        )
+    total = query.count()
+    rows = query.order_by(desc(UsageRecordDb.created_at), desc(UsageRecordDb.id)).offset(offset).limit(limit).all()
+    store = _store()
+    items = []
+    for row, user_name, api_key_label in rows:
+        event_id = _event_id(row.request_id)
+        available = False
+        if event_id is not None:
+            available = (
+                await _body_key(store, event_id, row.created_at, "request.json") is not None
+                or await _body_key(store, event_id, row.created_at, "response.json") is not None
+            )
+        items.append(
+            ArchiveRequest(
+                event_id=event_id,
+                request_id=row.request_id,
+                created_at=row.created_at,
+                user_id=row.user_id,
+                user_name=user_name,
+                api_key_id=row.api_key_id,
+                api_key_label=api_key_label,
+                model=row.model,
+                input_tokens=row.input_tokens,
+                output_tokens=row.output_tokens,
+                cached_input_tokens=row.cache_read_input_tokens,
+                status_code=row.status_code,
+                reasoning_level=row.reasoning_level,
+                request_mode=getattr(row, "request_mode", None),
+                cost_usd=float(row.billed_cost_usd) if row.billed_cost_usd is not None else None,
+                archive_available=available,
+            )
+        )
+    return ArchiveRequestPage(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.get("/{event_id}", response_model=ArchiveRequestDetail)

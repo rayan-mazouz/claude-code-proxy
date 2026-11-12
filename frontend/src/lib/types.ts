@@ -37,6 +37,7 @@ export interface OverviewStats {
     total_accounts: number;
     active_accounts: number;
     usable_accounts: number;
+    total_reset_credits_available: number | null;
     five_hour_average_pct: number;
     weekly_average_pct: number;
     five_hour_reset_at: string | null;
@@ -78,11 +79,17 @@ export interface ProxyEvent {
     archive_hot?: boolean;
 }
 
+export interface EventGroup {
+    key: string;
+    requests: { request_id: string; summary: ProxyEvent; event_count: number }[];
+}
+
 export interface ProxyEventPage {
     total: number;
     limit: number;
     offset: number;
     events: ProxyEvent[];
+    groups: EventGroup[];
 }
 
 export interface ArchiveRequestDetail {
@@ -414,7 +421,6 @@ export interface DashboardAnalytics {
     overview: OverviewStats;
     activity: ActivityResponse;
     hourly: HourlyResponse;
-    distributions: DistributionResponse | null;
     model_mix: ModelMixResponse | null;
     thinking_level_mix: ThinkingLevelMixResponse | null;
     lookups: { users: UserLookup[]; models: string[] };

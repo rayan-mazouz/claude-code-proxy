@@ -1,0 +1,27 @@
+name: macOS menu bar app
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["clients/claude-menu-bar/**", ".github/workflows/macos-menu-bar.yml"]
+  pull_request:
+    paths: ["clients/claude-menu-bar/**", ".github/workflows/macos-menu-bar.yml"]
+permissions:
+  contents: read
+jobs:
+  test-package:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install librsvg
+      - name: Test, package and launch native app
+        env:
+          APP_ARTIFACTS_DIR: ${{ github.workspace }}/artifacts
+          APP_SNAPSHOT_DIR: ${{ github.workspace }}/artifacts
+        run: clients/claude-menu-bar/scripts/package-macos.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Claude-macOS-validation
+          path: artifacts/
+          if-no-files-found: error

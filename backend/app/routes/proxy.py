@@ -1227,8 +1227,9 @@ async def proxy_messages(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             message="No subscription account or API fallback could serve the request",
         )
-        notifications.enqueue_elevated_503(db, settings.FRONTEND_ORIGIN)
-        notifications.enqueue_pool_unavailable(db, settings.FRONTEND_ORIGIN)
+        notifications.enqueue_capacity_exhausted(
+            db, settings.FRONTEND_ORIGIN, model=str(request_model) if request_model else None, request_id=request.state.proxy_event_request_id
+        )
         db.commit()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

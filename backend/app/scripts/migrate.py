@@ -346,6 +346,12 @@ def main() -> None:
     command.upgrade(Config("alembic.ini"), "head")
     sync_canonical_schema()
     ensure_concurrent_indexes()
+    from app.utils.notification_migrations import migrate_capacity_rules
+    from app.utils.postgres.base import SessionFactory
+
+    with SessionFactory() as db:
+        migrate_capacity_rules(db)
+        db.commit()
 
 
 if __name__ == "__main__":

@@ -22,8 +22,21 @@ class ProxyEvent(BaseModel):
     archive_hot: bool = True
 
 
+class EventRequestSummary(BaseModel):
+    request_id: str
+    summary: ProxyEvent
+    event_count: int
+
+
+class EventGroup(BaseModel):
+    key: str
+    requests: List[EventRequestSummary]
+
+
 class ProxyEventPage(BaseModel):
     total: int
     limit: int
     offset: int
     events: List[ProxyEvent]
+
+    groups: List[EventGroup] = Field(default_factory=list)

@@ -50,6 +50,7 @@ def test_request_history_counts_percentiles_filters_and_bundle(client, admin_hea
     bundle = client.get("/api/v1/stats/dashboard", headers=admin_headers, params=params)
     assert bundle.status_code == 200, bundle.text
     data = bundle.json()
+    assert "distributions" not in data  # Removed panel must not add percentile-query work.
     assert data["activity"] == body
     assert data["overview"]["requests"] == 4
     assert data["model_mix"] is not None and data["thinking_level_mix"] is not None

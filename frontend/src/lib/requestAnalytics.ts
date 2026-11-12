@@ -23,3 +23,40 @@ export function groupRequestUsers(
         return result;
     });
 }
+
+export const REQUEST_CHART_X_KEY = "timestamp";
+
+/** Recharts interprets dots/brackets as object paths. Encode the identity,
+ * never its current ranking, so one line cannot inherit another series' data. */
+export function requestSeriesKey(view: string, id: string): string {
+    return `${view}_${Array.from(id, (character) => character.codePointAt(0)!.toString(16)).join("_")}`;
+}
+
+export function requestChartRow(
+    timestamp: string,
+    values: Record<string, number> | undefined,
+    series: readonly { id: string; key: string }[],
+    missing: number | null,
+): Record<string, number | string | null> {
+    return {
+        [REQUEST_CHART_X_KEY]: timestamp,
+        ...Object.fromEntries(series.map((item) => [item.key, values?.[item.id] ?? missing])),
+    };
+}
+
+/** Use the exact row plotted by the lines, rather than cached tooltip registrations. */
+export function requestTooltipEntries(
+    row: Record<string, unknown>,
+    series: readonly { id: string; key: string; label: string; color: string }[],
+    hidden: ReadonlySet<string>,
+    view: string,
+) {
+    return series.flatMap((item) => {
+        const value = row[item.key];
+        return !hidden.has(`${view}:${item.id}`) &&
+            typeof value === "number" &&
+            Number.isFinite(value)
+            ? [{ ...item, value }]
+            : [];
+    });
+}

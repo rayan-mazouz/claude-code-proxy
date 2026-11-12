@@ -27,7 +27,54 @@ database record is used.
 
 The full-width **Request analytics** panel defaults to TPS and also includes requests by model and requests by user over time. Every view follows the selected date range, user, and model filters. Ranges up to two days use hourly buckets; longer ranges use daily buckets. Missing TPS measurements appear as gaps. Users contributing less than 5% of requests across the selected range are combined into one Others series in Requests by user. Model dropdowns list only models with activity in the selected range and user scope. **User analytics** opens with Models as its first tab, and **Peak requests** uses the full dashboard width.
 
-The home page fetches analytics through one read-only `/api/v1/stats/dashboard` response. Independent calculations use a bounded worker pool with separate database sessions. The Events page loads its user and model lists in one request and counts paginated request groups in the same query that selects them. None of this affects inference or account routing.
+Request analytics uses full bucket timestamps and stable per-series identifiers.
+Localized hour labels are display-only, so repeated hours across days cannot
+select a different tooltip bucket. Tooltip rows read the same series values as
+the plotted lines, including zero counts, TPS gaps, and hidden-series choices.
+
+The home page fetches analytics through one read-only `/api/v1/stats/dashboard` response. Independent calculations use a bounded worker pool with separate database sessions; the hidden legacy usage table no longer fetches data. Events combine lookup lists in one request and count paginated parent groups in the grouped selection query. These changes do not alter inference or account routing.
+
+## Shared dashboard behavior
+
+Both proxies use the same **Usage & limits** card: Input rate, Cache hit rate,
+Average 5-hour limit, and Average weekly limit. The account-count line remains
+plain text: “Quota averages across X / Y authenticated and enabled accounts.”
+The standalone Requests by model and Per-request token distribution cards are
+removed; requests by model over time remains available in Request analytics.
+The dashboard bundle no longer computes the removed distribution panel.
+There are no progress bars, pills, remaining percentages, or token-total captions
+in this card. The four percentage metrics use a two-by-two layout when the card is narrow.
+
+Weekly-exhausted accounts contribute 100% used to the five-hour average; they
+are not removed from its denominator. Reset countdowns show the earliest future
+reset that replenishes a nonempty quota window and leaves the account usable:
+other exhausted windows and cooldowns must expire by that reset time. Unknown
+or later blocking resets are skipped, and simultaneous resets are supported.
+These dashboard calculations do not change inference routing or consume resets.
+
+Fresh successful quota probes also release an old quota cooldown when the
+recorded quota-failure deadline matches and every observed window is usable.
+Short backoffs, unrelated transient failures, missing probe data, and real quota
+exhaustion do not clear a cooldown. The Usage & limits card reports the total
+banked limit-reset credits for enabled authenticated accounts as a fifth metric column when the provider
+supports them (Codex); unsupported providers do not display a fictitious zero.
+Narrow cards use two columns with the reset count on a full-width final row.
+
+Both Events pages request server-built, filtered parent groups and request
+summaries. Lifecycle events load in chronological order when a request expands
+and are cached until the next page refresh. Filters apply to matching requests
+inside a parent group, and pagination counts parent groups. Shared regression
+tests cover these behaviors in both backends. Both expose paginated, searchable
+`GET /api/v1/requests` archive listings; archive availability includes captures
+with a response body even when the request body is absent.
+
+The shared frontend analytics and card regression tests run with
+`cd frontend && node --test tests/*.test.mjs`. CI and `make verify` run the frontend regression tests in both repositories.
+Backend suites run with
+`cd backend && uv run pytest -q`. Provider-specific protocol, authentication,
+models, thinking modes, caching, installers, and reset-credit features retain
+provider-appropriate implementations and tests; OpenAI-only settings are not
+exposed as unsupported Claude options.
 
 ## Quick start
 
@@ -66,14 +113,11 @@ use the blue-green flow below when you need zero-downtime rollouts.
 
 ### Optional macOS menu-bar app
 
-If you use the dashboard from a Mac, the companion menu-bar app provides compact
-Overview and Accounts views, including the same `All`, `Authenticated`, and
-`Usable` account filters. The latest ad-hoc-signed build is published at the
-[Claude Code Proxy macOS releases](https://github.com/devasheeshG/claude-code-proxy/releases)
-page. Download `Claude-Code-Proxy-macOS.dmg`, open the disk image, and move
-**Claude Code Proxy.app** to Applications. This build is intended for local use;
-macOS may require Control-clicking the app and choosing **Open** because it is
-not notarized.
+The native menu-bar app shows live active-account coverage, five-hour and weekly
+quota averages, and reset countdowns in a compact popover. Refresh and Settings
+are at the top-right. The removed Accounts/demo/activity/widget interfaces are
+not part of the minimal app. See [native app documentation](clients/claude-menu-bar/README.md)
+for authentication, force-refresh behavior, tests, packaging, and signing limits.
 
 ## Project status
 
@@ -508,3 +552,18 @@ resort after model-compatible account capacity is exhausted.
 Presets include **Allow API fallback providers**. Users inherit this setting unless they select a per-user fallback override. Clearing the override restores preset inheritance. The migration preserves existing user fallback permissions.
 
 Request metrics are finalized when provider usage arrives. Interrupted or incomplete responses without usage are shown as **Unavailable**, rather than zero-token, zero-cost successes. HTTP 200 alone does not mean generation finished; historical captures without final usage cannot supply exact token counts or TPS.
+
+## Unified capacity alerts
+
+**Request capacity exhausted** replaces Entire account pool unavailable and
+503 capacity exhaustion. An exhausted HTTP 503 request queues one alert type,
+including model-specific failures, with the model, failure reason, pool counts,
+next useful capacity reset, and a rolling 60-second failure/user summary.
+
+Deployment automatically merges old database rules per channel: enabled when
+either old rule was enabled; the longest enabled-rule cooldown wins; customized
+old templates are preserved together using the supported legacy variables.
+Existing merged-rule settings are never overwritten on subsequent migrations.
+Legacy queued/retrying duplicates are suppressed; sent history stays intact and
+still contributes to the shared notification cooldown. No migration sends a
+notification. A zero cooldown allows one alert per exhausted request.
